@@ -10,6 +10,45 @@ import com.shilapi.xcertplay.airplay.AirPlayConfig
 import com.shilapi.xcertplay.airplay.AirPlayDisplayConfig
 
 class LegacyCompatibilityTest {
+    @Test fun siriInvocationsStayOrderedWhileRequestsArriveTogether() {
+        val started = java.util.concurrent.CountDownLatch(1)
+        val release = java.util.concurrent.CountDownLatch(1)
+        val completed = java.util.concurrent.CountDownLatch(2)
+        val actions = java.util.Collections.synchronizedList(arrayListOf<String>())
+        val serial = SiriRequestSerialiser()
+        try {
+            assertTrue(serial.submit({ true }, {
+                actions.add("A-start"); started.countDown()
+                check(release.await(5, java.util.concurrent.TimeUnit.SECONDS)); actions.add("A-end")
+            }, { error -> assertNull(error); completed.countDown() }))
+            assertTrue(started.await(5, java.util.concurrent.TimeUnit.SECONDS))
+            assertTrue(serial.submit({ true }, { actions.add("B-start"); actions.add("B-end") }, { completed.countDown() }))
+            release.countDown()
+            assertTrue(completed.await(5, java.util.concurrent.TimeUnit.SECONDS))
+            assertEquals(listOf("A-start", "A-end", "B-start", "B-end"), actions.toList())
+        } finally { release.countDown(); serial.close() }
+    }
+    @Test fun siriFailureDoesNotKillNextInvocationOrOverrideUpstreamSequence() {
+        val done = java.util.concurrent.CountDownLatch(2)
+        val actions = arrayListOf<Int>()
+        val serial = SiriRequestSerialiser()
+        try {
+            assertTrue(serial.submit({ true }, { actions.add(2); throw java.io.IOException("not logged") },
+                { error -> assertEquals("IOException", error); done.countDown() }))
+            assertTrue(serial.submit({ true }, { actions.add(2); actions.add(3) }, { error -> assertNull(error); done.countDown() }))
+            assertTrue(done.await(5, java.util.concurrent.TimeUnit.SECONDS))
+            assertEquals(listOf(2, 2, 3), actions)
+        } finally { serial.close() }
+    }
+    @Test fun siriDiscardsEndedSessionAndRejectsClosedQueue() {
+        val discarded = java.util.concurrent.CountDownLatch(1)
+        val serial = SiriRequestSerialiser()
+        try {
+            assertTrue(serial.submit({ false }, { fail("stale session invoked") }, { fail("stale request completed") }, { discarded.countDown() }))
+            assertTrue(discarded.await(5, java.util.concurrent.TimeUnit.SECONDS))
+        } finally { serial.close() }
+        assertFalse(serial.submit({ true }, {}, { fail("closed queue accepted") }))
+    }
     @Test fun gpsReporterSendsInitialFixAndStopsSharedWifiRequest() {
         var now = 0L
         val shared = com.shilapi.xcertplay.transport.Iap2LocationRequest()
@@ -96,6 +135,13 @@ class LegacyCompatibilityTest {
         assertEquals("Wi-Fi iAP隧道监听已建立", AirPlayDiagnostics.summary("AirPlay iAP tunnel listening address=192.0.2.1 port=1234"))
     }
     @Test fun audioSetupDiagnosticsRejectPayloadsAndUnknownNames() {
+        assertNotNull(AirPlayDiagnostics.summary("receiver siri request down=true up=false"))
+        assertNull(AirPlayDiagnostics.summary("receiver siri request down=true up=false text=private"))
+        assertNotNull(AirPlayDiagnostics.summary("receiver microphone unavailable reason=missing-input-key"))
+        assertNull(AirPlayDiagnostics.summary("receiver microphone unavailable reason=missing-input-key private=secret"))
+        assertNull(AirPlayDiagnostics.summary("receiver microphone unavailable reason=private"))
+        assertNotNull(AirPlayDiagnostics.summary("receiver audio requested type=100 purpose=speechrecognition microphoneEnabled=true"))
+        assertNull(AirPlayDiagnostics.summary("receiver audio requested type=100 purpose=speechrecognition microphoneEnabled=true address=private"))
         val setup = "receiver audio setup type=100 codec=LPCM rate=16000 channels=1 purpose=speechrecognition microphone=true"
         assertTrue(AirPlayDiagnostics.summary(setup)!!.contains("speechrecognition"))
         assertNull(AirPlayDiagnostics.summary(setup + " private=secret"))

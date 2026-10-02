@@ -33,6 +33,11 @@ object AirPlayDiagnostics {
     }
     private val endpoints = listOf("/pair-setup", "/pair-verify", "/auth-setup", "/info", "/command", "/feedback")
     fun summary(message: String): String? {
+        if (Regex("^receiver siri request down=(true|false) up=(true|false)$").matches(message)) return "Siri上游请求写入：" + message.removePrefix("receiver siri request ")
+        if (Regex("^receiver audio requested type=[0-9]+ purpose=(media|telephony|speechrecognition|alert|default|compatibility|其他) microphoneEnabled=(true|false)$").matches(message)) return "手机音频SETUP请求：" + message.removePrefix("receiver audio requested ")
+        if (message == "receiver microphone negotiated waitingForAudio=true") return "麦克风已协商：按原仓库等待音频首包后启动录音"
+        val microphoneReasons = mapOf("disabled" to "本会话未启用", "stream-type" to "非主音频流", "audio-purpose" to "非语音/电话用途", "missing-port" to "手机未提供上行端口", "invalid-port" to "上行端口无效", "missing-peer" to "缺少会话对端", "missing-input-key" to "缺少输入加密材料", "missing-output-key" to "缺少输出加密材料")
+        microphoneReasons[message.removePrefix("receiver microphone unavailable reason=")].takeIf { message.startsWith("receiver microphone unavailable reason=") }?.let { return "麦克风未建立：$it" }
         if (Regex("^receiver audio setup type=[0-9]+ codec=(LPCM|AAC_LC|OPUS) rate=[0-9]+ channels=[0-9]+ purpose=(media|telephony|speechrecognition|alert|default|compatibility|其他) microphone=(true|false)$").matches(message)) return "音频SETUP协商：" + message.removePrefix("receiver audio setup ")
         if (Regex("^receiver audio rejected type=[0-9]+ count=[0-9]+$").matches(message)) return "音频包拒绝（认证/解析失败）：" + message.removePrefix("receiver audio rejected ")
         if (message.startsWith("AirPlay iAP SETUP uuid=")) return "Wi-Fi iAP隧道SETUP已请求（不记录UUID/密钥种子）"

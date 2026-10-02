@@ -38,7 +38,7 @@ Earlier releases were tested on the development DiLink5.1 car: live windshield g
 
 ## Experimental legacy receiver contribution
 
-An optional [Android 4.3 / API18 receiver](adaptation/receiver/README.md) is available in this contribution branch. It uses a separate package and build, with firmware-specific limits. This does not change the upstream Android 9+ APK or BYD support policy.
+An optional [Android 4.3 / API18 receiver](adaptation/receiver/README.md), version **0.21-experimental**, is available in this contribution branch. It uses a separate package and build, with firmware-specific limits. This does not change the upstream Android 9+ APK or BYD support policy.
 
 ## Documentation
 

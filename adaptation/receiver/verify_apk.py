@@ -3,10 +3,11 @@ from pathlib import Path
 from zipfile import ZipFile
 import struct
 import hashlib
+import sys
 import os
 
 root = Path(__file__).resolve().parents[2]
-apk = root / 'adaptation/output/DiPlay-Android43-Wireless-Experimental.apk'
+apk = Path(sys.argv[1]) if len(sys.argv)>1 else root / 'adaptation/output/DiPlay-Android43-Wireless-Experimental.apk'
 sdk = Path(os.environ.get('DIPLAY_PLATFORM_JAR', root / 'tools/android/android-4.3.1/android.jar'))
 with ZipFile(sdk) as platform:
     available = {'L' + name[:-6] + ';' for name in platform.namelist() if name.endswith('.class')}
@@ -138,6 +139,6 @@ with ZipFile(apk) as package:
             assert package.read('assets/offline-mfi/' + name) == (Path(auth)/'offline-mfi'/name).read_bytes()
     else:
         assert not any(name.startswith('assets/offline-mfi/') for name in package.namelist()), 'Unexpected runtime identity'
-    print('PASS: SDK18 platform references, DEX035, single DEX, CRC, explicit runtime asset policy, mDNS reflection, stack line metadata')
+    print('PASS: SDK18 platform references, DEX035, single DEX, CRC, explicit runtime assets, mDNS reflection, stack line metadata')
     print('DEX method references:', u32(88))
 print('APK SHA256:', hashlib.sha256(apk.read_bytes()).hexdigest())

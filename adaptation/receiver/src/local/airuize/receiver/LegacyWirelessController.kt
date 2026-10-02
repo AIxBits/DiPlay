@@ -19,7 +19,8 @@ import javax.jmdns.*
 /** A wireless-only controller: existing car AP -> RFCOMM -> iAP2 -> AirPlay media/tunnel. */
 class LegacyWirelessController(private val context: Context, private val sink: LegacyMediaSink,
     private val log: (String) -> Unit, private val displayWidth: Int = 1024, private val displayHeight: Int = 600, private val gpsEnabled: Boolean = true,
-    private val onConnectionFailure: (String) -> Unit = {}) : Closeable {
+    private val onConnectionFailure: (String) -> Unit = {},
+    private val settings: ReceiverSettings = ReceiverSettings(), private val onHostUi: ()->Unit = {}) : Closeable {
     private val closed = CloseGate()
     private val resources = ArrayList<() -> Unit>()
     private val lock = Any()
@@ -33,6 +34,9 @@ class LegacyWirelessController(private val context: Context, private val sink: L
     private val handoffTimerStarted = AtomicBoolean(false)
     @Volatile private var closeBluetoothBootstrap: (() -> Unit)? = null
     private val acceptedConnections = java.util.concurrent.atomic.AtomicInteger()
+    private val audioSetupRequests = java.util.concurrent.atomic.AtomicInteger()
+    private val microphoneNegotiatedRequests = java.util.concurrent.atomic.AtomicInteger()
+    @Volatile private var microphoneNegotiation = "未收到音频SETUP"
     private val discoveredControls = java.util.concurrent.atomic.AtomicInteger()
     private val resolvedControls = java.util.concurrent.atomic.AtomicInteger()
     @Volatile private var listenerSocket: ServerSocket? = null
@@ -49,7 +53,7 @@ class LegacyWirelessController(private val context: Context, private val sink: L
         else { close(); onConnectionFailure("启动失败：$stage") }
     }
     fun frameRendered() { if (firstFrame.compareAndSet(false, true)) log("已输出首帧：CarPlay 视频接收和解码链路已运行") }
-    fun diagnosticSummary(): String = "连接统计：已停止=${closed.get()}；TCP接入=${acceptedConnections.get()}；会话激活=${activeSession != null}；已输出首帧=${firstFrame.get()}；iAP隧道曾接入=${tunnelAccepted.get()}；${handoff.summary()}；车机GPS上报启用=$gpsEnabled（实际发送看定位日志）；音频焦点/轮速挡位/持续重连=未接入；方向盘语音=MCU回调待实测"
+    fun diagnosticSummary(): String = "连接统计：已停止=${closed.get()}；TCP接入=${acceptedConnections.get()}；会话激活=${activeSession != null}；已输出首帧=${firstFrame.get()}；iAP隧道曾接入=${tunnelAccepted.get()}；${handoff.summary()}；车机GPS上报启用=$gpsEnabled（实际发送看定位日志）；CAN车速=只读接入（实际有效性见日志）；独立车速需要已核对挡位映射；音频焦点/持续重连=后台管理；方向盘语音=MCU回调实机通过；音频SETUP请求=${audioSetupRequests.get()}；已协商收音流累计=${microphoneNegotiatedRequests.get()}；最近收音协商=$microphoneNegotiation"
     private fun armHandoffWatchdog() {
         if (!handoffTimerStarted.compareAndSet(false, true)) return
         Thread({
@@ -71,13 +75,19 @@ class LegacyWirelessController(private val context: Context, private val sink: L
             start()
         }
     }
+    private fun bluetoothProfileSnapshot(stage:String) {
+        try {
+            val adapter=BluetoothAdapter.getDefaultAdapter()
+            log("蓝牙配置[$stage]：enabled=${adapter?.isEnabled}；HFP=${adapter?.getProfileConnectionState(android.bluetooth.BluetoothProfile.HEADSET)}；A2DP=${adapter?.getProfileConnectionState(android.bluetooth.BluetoothProfile.A2DP)}；0=断开/1=连接中/2=已连接/3=断开中；状态为系统汇总，不记录设备地址")
+        } catch(error:Exception) { log("蓝牙配置[$stage]读取失败：${error.javaClass.simpleName}") }
+    }
     private fun completeHandoff() {
         if (closed.get()) return
         val release = closeBluetoothBootstrap ?: return
         if (!handoff.claimCompletion()) return
         Thread({
             if (!closed.get()) {
-                try { release(); log("无线交接完成：已释放蓝牙启动通道，保留 Wi-Fi CarPlay") }
+                try { bluetoothProfileSnapshot("交接前"); release(); log("无线交接完成：只释放应用RFCOMM/iAP2启动通道，保留Wi-Fi；未关闭蓝牙适配器或主动断开HFP/A2DP"); bluetoothProfileSnapshot("交接后") }
                 catch (e: Exception) { if (!closed.get()) failure("释放蓝牙启动通道", e) }
             }
         }, "legacy-wireless-handoff").apply { isDaemon = true; start() }
@@ -94,48 +104,17 @@ class LegacyWirelessController(private val context: Context, private val sink: L
         fun step(value: String) { stage = value; log("启动阶段：$value") }
         try {
             step(stage)
-            val wifi = context.getSystemService(Context.WIFI_SERVICE) as WifiManager
-            fun apState() = (wifi.javaClass.getMethod("getWifiApState").invoke(wifi) as Number).toInt()
-            val ap = wifi.javaClass.getMethod("getWifiApConfiguration").invoke(wifi) as? WifiConfiguration
-                ?: error("无法读取车机热点配置")
-            check(!ap.SSID.isNullOrBlank() && !ap.preSharedKey.isNullOrEmpty()) { "热点名称或密码未配置" }
-            check(ap.allowedKeyManagement.get(WifiConfiguration.KeyMgmt.WPA_PSK)) { "当前版本仅支持 WPA-PSK 热点" }
-            if (apState() != 13) {
-                step("自动开启车机已保存的热点")
-                val stationWasEnabled = wifi.isWifiEnabled
-                var requested = false
-                try {
-                    if (stationWasEnabled) check(wifi.setWifiEnabled(false)) { "无法切换车机 Wi-Fi 模式" }
-                    check(!closed.get()) { "Receiver stopped" }
-                    val enabled = wifi.javaClass.getMethod("setWifiApEnabled", WifiConfiguration::class.java, java.lang.Boolean.TYPE).invoke(wifi, ap, true)
-                    check(enabled == true) { "车机拒绝开启热点" }
-                    requested = true
-                    val deadline = System.nanoTime() + 10_000_000_000L
-                    while (!closed.get() && apState() != 13 && System.nanoTime() < deadline) Thread.sleep(250)
-                    check(!closed.get() && apState() == 13) { "车机热点未准备完成" }
-                } catch (error: Exception) {
-                    if (requested) runCatching { wifi.javaClass.getMethod("setWifiApEnabled", WifiConfiguration::class.java, java.lang.Boolean.TYPE).invoke(wifi, ap, false) }
-                    if (stationWasEnabled) runCatching { wifi.setWifiEnabled(true) }
-                    throw error
-                }
-            }
-            fun hotspotAddress(): Pair<NetworkInterface, Inet4Address>? {
-                val candidates = Collections.list(NetworkInterface.getNetworkInterfaces()).filter {
-                    it.isUp && !it.isLoopback && (it.name.startsWith("wlan") || it.name.startsWith("p2p") || it.name.startsWith("ap"))
-                }.sortedBy { if (it.name.startsWith("wlan")) 0 else 1 }
-                return candidates.flatMap { ni -> Collections.list(ni.inetAddresses).filterIsInstance<Inet4Address>().map { ni to it } }
-                    .firstOrNull { !it.second.isLoopbackAddress && !it.second.isAnyLocalAddress }
-            }
-            val addressDeadline = System.nanoTime() + 5_000_000_000L
-            var address = hotspotAddress()
-            while (!closed.get() && address == null && System.nanoTime() < addressDeadline) { Thread.sleep(250); address = hotspotAddress() }
-            check(!closed.get()) { "Receiver stopped" }
-            val pair = address
-                ?: error("车机热点没有可用 IPv4 地址；请提供新版检测报告")
-            val ni = pair.first; val host = pair.second
-            log("热点接口=${ni.name}；IPv4=${host.hostAddress}")
             val adapter = BluetoothAdapter.getDefaultAdapter() ?: error("Android 蓝牙不可用")
             check(adapter.isEnabled) { "请开启蓝牙" }
+            val wifi = context.getSystemService(Context.WIFI_SERVICE) as WifiManager
+            val power = context.getSystemService(Context.POWER_SERVICE) as android.os.PowerManager
+            val wake = power.newWakeLock(android.os.PowerManager.PARTIAL_WAKE_LOCK, "DiPlay:wireless").apply { setReferenceCounted(false) }
+            own(wake) { if(it.isHeld) it.release() }; wake.acquire()
+            val radio = wifi.createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "DiPlay:wireless").apply { setReferenceCounted(false) }
+            own(radio) { if(it.isHeld) it.release() }; radio.acquire()
+            val network = own(LegacyNetwork(context, settings, { closed.get() }, log)) { it.close() }
+            val access = network.prepare()
+            val ni = access.iface; val host = access.address
             val btMac = adapter.address ?: error("无法读取蓝牙地址")
             val preferences = context.getSharedPreferences("receiver-identity", Context.MODE_PRIVATE)
             val deviceId = ni.hardwareAddress?.takeIf { it.size == 6 }?.joinToString(":") { "%02X".format(it.toInt() and 255) }
@@ -153,15 +132,16 @@ class LegacyWirelessController(private val context: Context, private val sink: L
             }
             val mfi = LocalMfiAuthenticationClient.load(authenticationDirectory)
             val config = AirPlayConfig("DiPlay Legacy", deviceId, btMac, "950.7.1",
-                AirPlayDisplayConfig(displayWidth, displayHeight, fps = 30), hevc = false, microphone = microphone,
-                manufacturer = "DiPlay Legacy", model = "iMX6-Android43", oemLabel = "车机")
+                settings.display(), rightHandDrive = settings.rightHandDrive, hevc = settings.hevc && CodecCapabilities.hevc(), microphone = microphone,
+                opus = settings.opus && CodecCapabilities.opus(), icons = LegacyOem.icons(),
+                manufacturer = "DiPlay Legacy", model = "iMX6-Android43", oemLabel = "DiPlay")
             val media = CarPlayMediaEngine(sink, microphoneEnabled = microphone)
             val identification = Iap2IdentificationConfig("DiPlay Legacy", "iMX6-Android43", "DiPlay Legacy",
-                identity.pairingId, "0.12", "iMX6", Iap2WirelessIdentification(btMac, unquote(ap.SSID))).copy(locationInformationEnabled = gpsEnabled)
-            val channel = try { ap.javaClass.getField("apChannel").getInt(ap).coerceIn(0, 255) } catch (_: Exception) { 0 }
+                identity.pairingId, "0.21", "iMX6", Iap2WirelessIdentification(btMac, access.ssid)).copy(locationInformationEnabled = gpsEnabled, vehicleSpeedEnabled = gpsEnabled && VehicleSpeedPolicy.gearMap(context.getSharedPreferences("receiver-ui",0).getString("vehicleGearMap", "") ?: "").isNotEmpty())
+            val channel = access.channel
             if (channel == 0) log("热点信道未知，将按上游允许的未知信道值尝试连接")
             step("准备无线启动参数")
-            val endpoint = Iap2WirelessCarPlayEndpoint(unquote(ap.SSID), unquote(ap.preSharedKey), channel,
+            val endpoint = Iap2WirelessCarPlayEndpoint(access.ssid, access.password, channel,
                 Iap2WirelessSecurity.WPA_WPA2, listOf(host.hostAddress), config.port, deviceId, identity.publicKeyHex, config.sourceVersion)
             val locationRequest = own(Iap2LocationRequest()) { it.components = null }
             media.setIapTunnelHandler { stream ->
@@ -172,7 +152,7 @@ class LegacyWirelessController(private val context: Context, private val sink: L
                         try {
                             val tunnel = own(Iap2Session.openTunnel(stream)) { it.close() }
                             log("Wi-Fi iAP2 通道已建立")
-                            val gps = if (gpsEnabled) own(LegacyCarPlayLocationProvider(context, "Wi-Fi", log)) { it.close() } else null
+                            val gps = if (gpsEnabled) own(LegacyVehicleLocationProvider(context, "Wi-Fi", log)) { it.close() } else null
                             try { Iap2WirelessControlClient(tunnel, Iap2MfiAuthenticationClient(mfi)).run(identification, endpoint,
                                 timeoutMillis = Iap2WirelessControlClient.NO_TIMEOUT_MILLIS,
                                 locationProvider = gps, locationRequest = locationRequest, continueLocationRequest = true,
@@ -203,9 +183,22 @@ class LegacyWirelessController(private val context: Context, private val sink: L
                         val session = AirPlaySession(socket, config, identity, pairings, mfi,
                             object : AirPlaySessionListener {
                                 override fun onSessionActive(session: AirPlaySession) { activeSession = session; log("AirPlay 会话已激活，等待画面") }
-                                override fun onSessionEnded(session: AirPlaySession) { if (activeSession === session) activeSession = null; sessions.remove(session); log("AirPlay 会话结束") }
+                                override fun onSessionEnded(session: AirPlaySession) {
+                                    val wasActive = activeSession === session
+                                    if(wasActive) activeSession = null
+                                    sessions.remove(session); log("AirPlay 会话结束")
+                                    if(wasActive && !closed.get()) onConnectionFailure("Session disconnected")
+                                }
+                                override fun onHostUiRequested(session: AirPlaySession) { if(activeSession === session) onHostUi() }
                                 override fun onTransportError(message: String) { log("AirPlay 传输错误") }
-                                override fun onDebugLog(message: String) { AirPlayDiagnostics.summary(message)?.let(log) }
+                                override fun onDebugLog(message: String) {
+                                    AirPlayDiagnostics.summary(message)?.let { safe ->
+                                        if (safe.startsWith("手机音频SETUP请求：")) audioSetupRequests.incrementAndGet()
+                                        if (safe.startsWith("麦克风已协商：")) microphoneNegotiatedRequests.incrementAndGet()
+                                        if (safe.startsWith("麦克风已协商：") || safe.startsWith("麦克风未建立：")) microphoneNegotiation = safe
+                                        log(safe)
+                                    }
+                                }
                                 override fun onCommand(session: AirPlaySession, type: String, params: Map<String, Any?>) {
                                     AirPlayDiagnostics.command(type, params)?.let(log)
                                     if (!closed.get() && activeSession === session && handoff.request(type)) {
@@ -278,6 +271,7 @@ class LegacyWirelessController(private val context: Context, private val sink: L
                 } catch (_: InterruptedException) {}
             }, "legacy-wifi-diagnostics").apply { isDaemon = true; own(this) { it.interrupt() }; start() }
             log("接收端已监听 ${ni.name}；开始蓝牙握手")
+            bluetoothProfileSnapshot("新增RFCOMM前")
             step("连接蓝牙 RFCOMM")
             val socket = own(phone.createRfcommSocketToServiceRecord(UUID.fromString("00000000-deca-fade-deca-deafdecacafe"))) { it.close() }
             val connected = AtomicBoolean(false)
@@ -293,7 +287,7 @@ class LegacyWirelessController(private val context: Context, private val sink: L
             completeHandoff()
             log("蓝牙 iAP2 已建立；开始认证")
             step("蓝牙 iAP2 认证和无线启动")
-            val gps = if (gpsEnabled) own(LegacyCarPlayLocationProvider(context, "蓝牙", log)) { it.close() } else null
+            val gps = if (gpsEnabled) own(LegacyVehicleLocationProvider(context, "蓝牙", log)) { it.close() } else null
             log("蓝牙控制策略：GPS启用=$gpsEnabled；超时=${if (gpsEnabled) "24小时" else "5分钟"}；定位只在手机订阅后开始")
             val result = try { Iap2WirelessControlClient(bootstrap, Iap2MfiAuthenticationClient(mfi)).run(identification, endpoint,
                 timeoutMillis = if (gpsEnabled) 24 * 60 * 60 * 1000L else 300000L,

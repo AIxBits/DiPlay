@@ -1,21 +1,16 @@
 # Legacy receiver validation
 
-Adaptation: 0.13-experimental. Upstream baseline: DiPlay 0.2.8,
+Adaptation: 0.21-experimental. Upstream baseline: DiPlay 0.2.8,
 `f2d06951b4e8114dbb62f551c12a32a845a3042f`.
 
-- 63 JVM tests: upstream protocol/media tests plus API18 compatibility,
-  pairing, IPv4 transport, handoff, lifecycle, GPS and voice-key policy checks.
-- SDK18 platform class/member checks; single DEX035; ZIP CRC; no native libraries.
-- Post-R8 JmDNS service/TXT startup and reflective EnumMap method preservation.
-- APK v1 signature verified with minimum SDK18.
-- Upstream public-tree credential check and separate personal-data review.
-- Tests generate synthetic authentication identities; no private inputs are tracked.
+- 115 JVM tests passed: 113 protocol/media/compatibility tests and 2 IPv6 transport tests. Tests use synthetic authentication identities and temporary local sockets.
+- SDK18 platform class/member audit, single DEX035, ZIP CRC and no native libraries.
+- Post-R8 mDNS service/TXT creation and EnumMap reflection checks passed.
+- APK v1 signature verified for minimum SDK18.
+- Publication source privacy and credential-container checks are run separately.
 
-The publication changes only documentation, asset text, toolchain paths and test
-provisioning around the existing v0.13 implementation. No original firmware,
-device report, terminal output or contributor's local path is published.
+The device operator reported the 0.21 Android 4.3 version working after the display-recovery revision. Earlier device feedback confirmed wireless video/touch, music/navigation/Siri invocation and physical steering-key delivery. These observations do not establish support on other firmware, complete USB sessions, all audio streams, telephone duplex audio, iPhone adoption of vehicle GPS/CAN speed or fully authenticated Wi-Fi iAP2 handoff.
 
-The upstream Gradle build/lint suite has not been run locally for this optional
-target; its source and build configuration are unchanged. These local checks do
-not establish complete phone call/microphone behavior, vehicle GPS adoption,
-physical steering-button delivery or full wireless tunnel handoff.
+The report asset is updated for this public version, without changing the tested runtime source. No firmware image, personal device report, terminal output, runtime accessory identity or signing key belongs in this source tree. English public documentation replaces local development notes.
+
+The upstream Gradle build/lint suite is not part of this optional target's local validation; its app source and build configuration remain unchanged. OEM Reverse Assist/PlatformService crashes are not considered resolved merely because the receiver works.

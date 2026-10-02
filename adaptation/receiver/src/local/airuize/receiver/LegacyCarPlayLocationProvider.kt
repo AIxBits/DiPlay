@@ -12,7 +12,7 @@ import com.shilapi.xcertplay.transport.Iap2LocationProvider
 
 /** One provider per iAP link; stopping Bluetooth must not stop the Wi-Fi provider. */
 class LegacyCarPlayLocationProvider(context: Context, private val link: String,
-    private val log: (String) -> Unit) : Iap2LocationProvider {
+    private val log: (String) -> Unit, private val vehicleSpeed: () -> Double? = { null }) : Iap2LocationProvider {
     private val manager = context.getSystemService(Context.LOCATION_SERVICE) as? LocationManager
     private var running = false
     private var closed = false
@@ -21,6 +21,7 @@ class LegacyCarPlayLocationProvider(context: Context, private val link: String,
     private var encoded = 0L
     private var seeded = 0L
     private var rejected = 0L
+    private var canSpeedUsed = 0L
     private fun age(location: Location): Long = if (location.elapsedRealtimeNanos > 0)
         (SystemClock.elapsedRealtimeNanos() - location.elapsedRealtimeNanos) / 1_000_000 else -1
     private val listener = object : LocationListener {
@@ -36,7 +37,7 @@ class LegacyCarPlayLocationProvider(context: Context, private val link: String,
         override fun onProviderDisabled(provider: String) = synchronized(this@LegacyCarPlayLocationProvider) { latest = null }
         override fun onStatusChanged(provider: String, status: Int, extras: Bundle?) {}
     }
-    override fun onRequested(components: Set<Int>) { log("车载GPS[$link]手机定位订阅已收到；请求项数量=${components.size}；只提供GGA/RMC，不提供轮速") }
+    override fun onRequested(components: Set<Int>) { log("车载GPS[$link]手机定位订阅已收到；请求项数量=${components.size}；提供GGA/RMC；CAN车速由车辆信息读取层提供") }
     @Synchronized override fun start(): Boolean {
         if (closed) return false
         if (running) return true
@@ -70,13 +71,15 @@ class LegacyCarPlayLocationProvider(context: Context, private val link: String,
         if (!GpsDiagnostics.freshGps(location.provider, location.latitude, location.longitude, location.isFromMockProvider, age(location))) {
             latest = null; rejected++; log("车载GPS[$link]位置过期，暂停发送等待新位置"); return null
         }
+        val canSpeed=vehicleSpeed()
+        if(canSpeed!=null) canSpeedUsed++
         return LegacyLocationEncoder.encode(CarPlayLocationFix(location.latitude, location.longitude,
             altitudeMeters = null, // Android altitude datum is not established as NMEA MSL altitude.
             bearingDegrees = if (location.hasBearing()) location.bearing.toDouble() else null,
-            speedMetersPerSecond = if (location.hasSpeed()) location.speed.toDouble() else null,
+            speedMetersPerSecond = canSpeed ?: if (location.hasSpeed()) location.speed.toDouble() else null,
             timestampMillis = location.time)).also {
                 encoded++
-                if (encoded == 1L || encoded % 30 == 0L) log("车载GPS[$link]有效NMEA提供=$encoded；手机实际使用仍需验证")
+                if (encoded == 1L || encoded % 30 == 0L) log("车载GPS[$link]有效NMEA提供=$encoded；CAN速度采用=$canSpeedUsed；本次速度来源=${if(canSpeed!=null) "ABS/CAN" else "GPS或缺失"}；手机实际使用仍需验证")
             }
     }
     @Synchronized override fun stop() {

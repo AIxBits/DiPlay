@@ -1,96 +1,56 @@
 # DiPlay Android 4.3 receiver
 
-**Experimental wireless CarPlay receiver for an Android 4.3 / API 18 head unit.**
-Adaptation version: **0.13-experimental**. Install on the **car**, not the iPhone.
-This optional receiver preserves the upstream Android 9+ application and its build.
-It uses a separate package, `local.airuize.diplaylegacy`.
+**Experimental CarPlay receiver for Android 4.3 / API 18 head units.**
+Adaptation version: **0.21-experimental**. Install on the **car**, not the iPhone.
+This separate package, `local.airuize.diplaylegacy`, preserves the upstream Android 9+ app and its build.
 
 Based on [DiPlay](https://github.com/shihabal3amri/DiPlay) public preview 0.2.8,
-commit `f2d06951b4e8114dbb62f551c12a32a845a3042f`. Upstream focuses on BYD;
-this contribution proposes a separate legacy target and does not expand the
-maintainer's supported vehicle list. Run one projection receiver at a time.
+commit `f2d06951b4e8114dbb62f551c12a32a845a3042f`. This is not a full merge of upstream 0.2.9.
+The original maintainer's BYD support commitment is unchanged. Use one projection receiver at a time.
 
-## Scope and implementation
+## Current behavior
 
-- Traditional Activity/View interface compiled against SDK18, single DEX035,
-  v1 APK signing, no AndroidX/Compose dependency and no native libraries.
-- Upstream iAP2 and AirPlay protocol/media sources are selected by
-  `prepare_sources.py`. The generated manifest records their original hashes;
-  API18 substitutions are explicit and the shared source files are unchanged.
-- Bluetooth startup and car-hotspot wireless connection, IPv4 listeners,
-  local authentication, encrypted control/events, H.264 Surface decoding,
-  PCM/AAC audio, touch, remembered-phone connection and diagnostic export.
-- Upstream Bluetooth-to-Wi-Fi handoff conditions: `disableBluetooth` plus
-  authenticated/subscribed tunnel readiness. The 45-second watchdog retains
-  established video, or closes an inactive stack and restores retry controls.
-- Vehicle GPS follows upstream location identification, shared subscriptions,
-  GGA/RMC encoding and rate limits. Fresh cached GPS seeds the first update;
-  STOP cancels each link's provider. Invalid, stale, mock and network fixes are
-  rejected; unknown satellite/HDOP/altitude values are not fabricated.
-- Optional Skypine MCU voice-button adapter: open/connect while disconnected,
-  request Siri while connected. It registers/unregisters callbacks, sends no
-  MCU/CAN commands, deduplicates events and offers a 15-second key capture.
-  An enabled foreground listener survives Activity closure; boot restores only
-  the listener. Actual key delivery and reboot behavior require device testing.
+- API18 Activity/View interface, single DEX035 and v1 APK signing, without AndroidX/Compose or native libraries.
+- Upstream iAP2/AirPlay sources selected by `prepare_sources.py`, with explicit API18 substitutions and source hashes. The shared source tree is unchanged.
+- Bluetooth wireless startup, car-hotspot projection, encrypted control/events, H.264 decoding, PCM/AAC audio, touch and upstream Siri invocation/microphone negotiation.
+- Connection starts from the wireless or USB entry. Connect-on-open and connect-after-boot are disabled by default. Background sessions and bounded reconnect backoff are configurable.
+- Upstream-style settings groups for connection, diagnostics, automation, display/performance, audio routing, location and permissions. Resolution, frame rate, physical size, safe area, buffer, full-screen, audio focus and optional navigation ducking are configurable.
+- Independent media/navigation stream overrides 0–20 and short-tone previews. Zero retains automatic routing; unsupported track creation falls back with a diagnostic entry. Phone and Siri streams remain separate.
+- GPS location subscriptions and GGA/RMC reporting based on upstream. Optional firmware-specific read-only ABS/CAN speed and gear getters; independent PASCD reporting requires a verified gear mapping and phone subscription.
+- Optional Skypine MCU voice listener: the recognized button opens the app when disconnected and invokes Siri when connected. Click behavior is retained; separate physical long-press behavior is not claimed.
+- A wireless first-frame wait no longer keeps the home/settings overlay covering projection. Entering/returning to projection reattaches the Surface; changed Surface dimensions recover even if Android reuses its wrapper.
+- Local report export, configurable relative report folder, media/audio self-tests, vehicle diagnostics and current OEM process-error snapshots. Reports are not sent automatically.
 
-## Evidence and limitations
+The UI reuses upstream language resources and provides a native-widget interpretation of the original style. Pixel-identical visuals and complete translation of every diagnostic message are not claimed.
 
-Development feedback from one Android 4.3, 32-bit ARM, i.MX6 firmware confirms
-wireless picture, full-screen H.264, basic touch, remembered-phone connection,
-music, navigation synchronization and Siri activation. GPS was readable through
-Android LocationManager. This is not a model compatibility list or a guarantee
-for other vehicles. The interface currently uses Simplified Chinese.
+## Device feedback and remaining limits
 
-Vehicle GPS transmission and iPhone adoption remain unverified: observed
-subscriptions were immediately cancelled. Full authenticated Wi-Fi iAP2 handoff,
-physical steering-button callbacks, telephone duplex audio, microphone routing,
-long journeys and persistent iPhone activities require further evidence.
-USB/NCM, Wi-Fi Direct, BYD HUD/dashboard, battery/gear/wheel-speed reporting,
-HEVC/Opus, and continuous automatic reconnection are outside this target's
-current implementation. Do not substitute GPS speed for vehicle wheel speed.
+Feedback from one Android 4.3, 32-bit ARM, i.MX6 firmware confirms wireless picture, full-screen H.264, touch, music, navigation synchronization/announcements, Siri invocation, steering-button delivery and independently readable vehicle GPS. The 0.21 display recovery version was reported working on that device. This is not a compatibility list or a guarantee for other head units.
 
-The upstream experimental authentication caveat applies: **this is not an
-Apple-certified product**. Runtime acceptance, future iOS compatibility and
-suitability of the experimental identity for general distribution are unresolved.
-As upstream documents, a release APK containing that identity makes its private
-key extractable. The Git repository excludes runtime identities and signing keys;
-source builds omit runtime authentication unless explicitly selected externally. Tests generate synthetic identities at runtime, following upstream credential policy.
+Implemented paths still needing hardware evidence include complete USB/NCM/VPN sessions, app-managed hotspot/Wi-Fi Direct/shared-router modes, iPhone adoption of vehicle GPS/CAN speed, all vendor audio stream choices, sustained microphone recognition, telephone duplex audio, full Bluetooth-to-Wi-Fi iAP2 handoff and long-session/reboot recovery. Codec-dependent HEVC/Opus require installed platform codecs; there is no bundled software codec.
 
-## Install and test
+Wireless handoff releases the application's RFCOMM only after `disableBluetooth` and authenticated/subscribed tunnel readiness. The 45-second monitor retains working video when the tunnel is unavailable. Cleanup does not request disconnection of the car's OEM Bluetooth profiles; complete equivalence with upstream connection lifecycle is not claimed.
 
-Install the legacy APK on a head unit that permits APK installation. Pair the
-phone and use the car hotspot; Wi-Fi Direct is not used on API18. Start the app,
-choose a paired phone if requested, and accept the phone's CarPlay prompts.
-Use a lower display mode if the decoder cannot sustain the larger frame size.
+BYD HUD/cluster integration, Android 11 map embedding, the upstream Home sample, wheel-pulse conversion, battery reporting and complete Live Activity behavior are not provided. The proposed platform/core/vehicle-layer refactor has not been completed. GPS speed is not described as measured wheel speed.
 
-For voice-button testing, open the app once and leave the optional background
-listener enabled. Test the voice button while connected, then from the car desktop
-after stopping the session. If no event arrives, use the 15-second diagnostic
-capture and export a report. Disable the checkbox to stop the persistent listener.
-Force-stopping the app requires opening it again.
+Reverse Assist/PlatformService crash reports remain unresolved without a stack trace. A public ActivityManager query attempts to record their current errors and manifest-defined service processes. A cleared or inaccessible record is inconclusive; this is not full historical logcat capture. The adaptation does not modify the OEM reverse-camera service.
 
-Leave vehicle GPS enabled and reconnect after changing it. Reports distinguish
-START/STOP, valid GPS fixes, NMEA provision and iAP2 send counters. An increasing
-send counter proves transmission, not that a navigation app chose vehicle GPS.
+## Install and diagnose
 
-Reports stay local until shared deliberately. This contribution contains no
-terminal paths, firmware images, personal device reports, Wi-Fi credentials,
-Bluetooth addresses, accessory keys or Android signing keys. Source file names
-and numeric firmware interface constants are retained for reproducibility.
+Install the Android 4.3 APK from this fork's release. The existing signing identity and package are retained for in-place updates. Pair the iPhone, keep the car's hotspot available, and select wireless connection. USB selects a different transport; use **Show projection** to return to an existing picture.
 
-## Build and validation
+After changing connection parameters, use **Apply settings and reconnect**. Audio preview requires stopping projection. Reports default to shared storage under `DiPlayLegacy`; folder names are relative and checked against path traversal.
 
-See [BUILD.md](BUILD.md). The legacy target is independent of the upstream Gradle
-application. Local validation of v0.13 passed **63 JVM tests**, SDK18 platform
-class/member checks, single-DEX035/CRC checks, v1 signature verification and the
-post-R8 JmDNS/EnumMap reflection test. These are local checks, not hardware proof.
+If a black picture or OEM service crash recurs, export before stopping or switching transport. Counters distinguish received video, configuration availability, decoder starts, output-buffer release and visible rendering targets. Counts alone do not prove physical display, sound output or iPhone use of GPS. Keep reports local unless deliberately shared.
+
+## Build, privacy and validation
+
+See [BUILD.md](BUILD.md), [VALIDATION.md](VALIDATION.md), [settings details](SETTINGS_0.20.md) and [display recovery](DISPLAY_RECOVERY_0.21.md).
+The repository excludes terminal paths, personal device reports, firmware images, Wi-Fi/Bluetooth credentials, accessory identities and Android signing keys. Tests generate synthetic identities.
+
+As documented by upstream, the release APK deliberately includes the experimental runtime identity and makes it extractable. This is not an Apple-certified product; future iOS acceptance and general-distribution suitability remain unresolved. Source-only builds omit runtime authentication unless explicitly provisioned from an external directory.
 
 ## Credits and licenses
 
-Preserve upstream [credits and licenses](../../docs/THIRD_PARTY_NOTICES.md),
-[LICENSE](../../LICENSE), and the notices copied into `assets/licenses`.
-DiPlay is based on [xcertplay](https://github.com/shilapi/xcertplay), GPL-3.0;
-the upstream DiAuto interface and website carry AGPL-3.0 notices. This adaptation
-uses a traditional Android interface and preserves the bundled notices.
-CarPlay belongs to Apple Inc.; no Apple, BYD or original-maintainer endorsement
-of this legacy receiver is implied.
+Preserve upstream [credits and licenses](../../docs/THIRD_PARTY_NOTICES.md), [LICENSE](../../LICENSE), and the bundled notices in `assets/licenses`.
+DiPlay is based on [xcertplay](https://github.com/shilapi/xcertplay), GPL-3.0; the DiAuto interface and website carry AGPL-3.0 notices. CarPlay belongs to Apple Inc.; no Apple, BYD or original-maintainer endorsement of this legacy target is implied.

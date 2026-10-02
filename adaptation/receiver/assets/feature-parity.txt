@@ -1,32 +1,22 @@
-DiPlay Android 4.3 receiver — v0.13 experimental
+DiPlay Android 4.3 receiver — v0.21 experimental
+Baseline: upstream DiPlay 0.2.8 / f2d06951. Implementation and hardware acceptance are separate.
 
-Based on upstream DiPlay public preview 0.2.8 (f2d06951).
-Independent SDK18 Activity/View receiver; the upstream Android 9+ app is unchanged.
+Reported on one Android4.3/i.MX6 firmware: wireless picture, H.264 full-screen video, touch, music, navigation synchronization/announcements, Siri invocation, steering-button delivery and independently readable vehicle GPS. Version0.21 display recovery was reported working. Other firmware is not guaranteed.
 
-Reported on one i.MX6 firmware: wireless picture, full-screen H.264, basic touch,
-remembered-phone connection, music, navigation synchronization, and Siri activation.
-GPS is readable through LocationManager. iPhone use of vehicle GPS is unverified.
-These reports are not a compatibility guarantee for other firmware.
+Settings: upstream-style native groups, manual wireless/USB selection, optional automatic connection, display scale/frame rate/physical size/safe area/full-screen, audio focus, buffer/volume and independent media/navigation streams0–20 with previews. Existing diagnostic tools remain available.
 
-GPS: upstream identification, shared location subscription, GGA/RMC reporting and
-rate limits. Only fresh, non-mock GPS fixes are used. Unknown fields stay empty.
-A fresh cached fix is seeded at subscription; STOP cancels provider activity.
-Logs record subscription and counters, not coordinates or NMEA payloads.
+Projection recovery: show the target before waiting for a first frame; force Surface attachment on projection return and changed Surface dimensions. A released output buffer does not prove visible panel output.
 
-Steering voice: optional firmware-specific Skypine MCU callback listener.
-Disconnected: open the receiver and connect. Connected: request Siri.
-Open the app once and enable the listener. Disable it to stop background listening.
-Physical button delivery and reboot recovery still need on-device confirmation.
-Use Diagnostics > steering-key capture for a 15-second numeric event trace.
+Voice button: recognized MCU click opens DiPlay when disconnected and invokes upstream Siri when connected. Separate physical long-press behavior is not implemented.
 
-Wireless handoff: release RFCOMM only after disableBluetooth and authenticated
-Wi-Fi tunnel readiness. After 45 seconds, preserve established video or clean up
-an inactive session. Complete handoff still needs device confirmation.
+GPS/CAN: valid Android GPS through upstream GGA/RMC. Read-only OEM ABS/CAN getters; independent PASCD requires verified gear mapping and phone subscription. iPhone adoption is unverified; wheel-pulse conversion is not implemented.
 
-Not implemented or not fully validated: USB/NCM, Wi-Fi Direct, BYD HUD/dashboard,
-battery/gear/wheel-speed reporting, HEVC/Opus, continuous background reconnection,
-phone calls and microphone uplink, iPhone persistent activities.
+Implemented but hardware-dependent: USBMUX/Lockdown/carkit/iAP2, NCM/IPv6/VPN; managed hotspot, Wi-Fi Direct and shared-router modes; HEVC/Opus only with installed codecs. Controls do not prove device support.
 
-Experimental authentication follows upstream public-preview packaging policy.
-This is not an Apple-certified product. Runtime identity acceptance and future
-iOS compatibility are not guaranteed. Diagnostic reports remain local.
+Still requiring evidence: full Wi-Fi iAP2 handoff, sustained microphone recognition, telephone duplex audio, every OEM audio stream, long-session/reboot recovery and iPhone Live Activities.
+
+Not provided: BYD HUD/cluster, Android11 embedded maps, upstream Home sample, battery data and completed platform/core/vehicle-layer refactor.
+
+Reverse Assist and PlatformService: current process-error snapshots may supply an exception stack. Missing records are inconclusive. The OEM service crash cause remains unresolved; this app does not modify the reverse-camera service.
+
+Reports remain local until deliberately shared. Source excludes identities and signing keys; the release APK includes upstream's experimental runtime identity, which is extractable. This is not an Apple-certified product.

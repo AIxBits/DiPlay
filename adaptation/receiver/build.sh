@@ -4,8 +4,15 @@ project_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 workspace_dir=$(CDPATH= cd -- "$project_dir/../.." && pwd)
 sdk_dir=${DIPLAY_PROBE_SDK_DIR:-"$workspace_dir/tools/android"}
 jdk_dir=${DIPLAY_PROBE_JDK_DIR:-${JAVA_HOME:?Set JAVA_HOME to JDK 11}}
-build_tools=${DIPLAY_BUILD_TOOLS_DIR:-"$sdk_dir/android-14"}
-platform_jar=${DIPLAY_PLATFORM_JAR:-"$sdk_dir/android-4.3.1/android.jar"}
+build_tools="$sdk_dir/android-14"
+platform_jar="$sdk_dir/android-4.3.1/android.jar"
+android_min_sdk=${DIPLAY_MIN_SDK:-18}
+android_target_sdk=${DIPLAY_TARGET_SDK:-$android_min_sdk}
+case "$android_min_sdk:$android_target_sdk" in
+    18:18) apk_filename=DiPlay-Android43-Wireless-Experimental.apk ;;
+    21:21) apk_filename=DiPlay-Android50-Wireless-Experimental.apk ;;
+    *) echo 'Supported SDK variants: 18:18 or 21:21' >&2; exit 1 ;;
+esac
 build_dir="$project_dir/build"
 delivery_dir="$workspace_dir/adaptation/output"
 kotlin_dir=${DIPLAY_KOTLIN_DIR:-"$workspace_dir/tools/kotlinc"}
@@ -43,7 +50,18 @@ compiler_cp="$platform_jar:$dependencies/bcprov-jdk15to18-1.79.jar:$dependencies
 "$jdk_dir/bin/java" -Xmx2g -cp "$kotlin_dir/lib/*" org.jetbrains.kotlin.cli.jvm.K2JVMCompiler \
     -kotlin-home "$kotlin_dir" -no-jdk -jvm-target 1.8 -classpath "$compiler_cp" \
     "$build_dir/upstream" "$project_dir/src" -d "$build_dir/receiver.jar"
-"$build_tools/aapt" package -f -M "$project_dir/AndroidManifest.xml" -S "$project_dir/res" \
+python3 - "$project_dir/AndroidManifest.xml" "$build_dir/AndroidManifest.xml" "$android_min_sdk" "$android_target_sdk" <<'PYSDK'
+from pathlib import Path
+import sys,xml.etree.ElementTree as ET
+source,target,minimum,requested=sys.argv[1:]
+namespace='http://schemas.android.com/apk/res/android'
+ET.register_namespace('android',namespace)
+tree=ET.parse(source); sdk=tree.getroot().find('uses-sdk')
+sdk.set('{'+namespace+'}minSdkVersion',minimum)
+sdk.set('{'+namespace+'}targetSdkVersion',requested)
+tree.write(target,encoding='utf-8',xml_declaration=True)
+PYSDK
+"$build_tools/aapt" package -f -M "$build_dir/AndroidManifest.xml" -S "$project_dir/res" \
     -A "$build_dir/assets" -I "$platform_jar" -0 mp4 -0 m4a -F "$build_dir/resources.apk"
 "$jdk_dir/bin/java" -Xmx2g -cp "$build_tools/lib/d8.jar" com.android.tools.r8.R8 --release --min-api 18 \
     --pg-conf "$project_dir/shrink.pro" --lib "$platform_jar" --output "$build_dir/dex" "$build_dir/receiver.jar" "$build_dir/java.jar" \
@@ -59,9 +77,9 @@ if [ ! -f "$build_dir/receiver.keystore" ]; then
 fi
 "$jdk_dir/bin/java" -jar "$build_tools/lib/apksigner.jar" sign --ks "$build_dir/receiver.keystore" \
     --ks-key-alias receiver --ks-pass pass:local-test-only --key-pass pass:local-test-only \
-    --min-sdk-version 18 --v1-signing-enabled true --v2-signing-enabled false --v3-signing-enabled false \
-    --v4-signing-enabled false --out "$delivery_dir/DiPlay-Android43-Wireless-Experimental.apk" "$build_dir/aligned.apk"
-"$jdk_dir/bin/java" -jar "$build_tools/lib/apksigner.jar" verify --verbose --min-sdk-version 18 \
-    "$delivery_dir/DiPlay-Android43-Wireless-Experimental.apk"
-"$build_tools/aapt" dump badging "$delivery_dir/DiPlay-Android43-Wireless-Experimental.apk"
-shasum -a 256 "$delivery_dir/DiPlay-Android43-Wireless-Experimental.apk"
+    --min-sdk-version "$android_min_sdk" --v1-signing-enabled true --v2-signing-enabled false --v3-signing-enabled false \
+    --v4-signing-enabled false --out "$delivery_dir/$apk_filename" "$build_dir/aligned.apk"
+"$jdk_dir/bin/java" -jar "$build_tools/lib/apksigner.jar" verify --verbose --min-sdk-version "$android_min_sdk" \
+    "$delivery_dir/$apk_filename"
+"$build_tools/aapt" dump badging "$delivery_dir/$apk_filename"
+shasum -a 256 "$delivery_dir/$apk_filename"
