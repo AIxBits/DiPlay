@@ -34,20 +34,56 @@ class LegacyWiredService : VpnService() {
     @Volatile private var media:LegacyMediaSink?=null
     @Volatile private var surface:Surface?=null
     private var selectedName:String?=null
+    private var detaching=false
     private var pendingPermission:String?=null
     private var denied=false
     private var transitionDevice:String?=null
     private var transitionTime=0L
     private val nextFrame=AtomicBoolean(true)
-    private val logHistory=StringBuilder("USB CarPlay 0.21\n")
-    fun report()=synchronized(logHistory) { logHistory.toString() }
-    private fun log(message:String) { synchronized(logHistory) { logHistory.append(message).append('\n'); if(logHistory.length>60000) logHistory.delete(0,12000) }; LegacySessionService.instance?.log(message) }
+    private val logHistory=StringBuilder("USB CarPlay 0.2.36\n")
+    private val evidence=TransportEvidence()
+    private var previousEvidence=""
+    private val evidenceDropped=java.util.concurrent.atomic.AtomicLong()
+    private var lastEvidenceWrite=0L // Accessed only by the evidence worker.
+    private val evidenceWriter=java.util.concurrent.ThreadPoolExecutor(1,1,0L,java.util.concurrent.TimeUnit.MILLISECONDS,
+        java.util.concurrent.ArrayBlockingQueue<Runnable>(256),
+        java.util.concurrent.ThreadFactory { Thread(it,"legacy-usb-evidence").apply { isDaemon=true } },
+        java.util.concurrent.ThreadPoolExecutor.AbortPolicy())
+    private var evidenceFile:File?=null
+    fun report():String = synchronized(logHistory) { logHistory.toString() }+
+        "\nRetained USB structural/audio evidence (current service):\n"+evidence.snapshot()+
+        "\nPrevious service USB evidence (may be a different session):\n"+previousEvidence
+    private fun retain(message:String) {
+        if(!TransportEvidence.relevant(message)) return
+        // Real-time callers only enqueue. Sanitizing while receiving UDP/USB delayed audio.
+        val timestamp=android.os.SystemClock.elapsedRealtime()
+        val bounded=if(message.length<=12000) message else "Diagnostic message omitted: over size limit"
+        try { evidenceWriter.execute {
+            evidence.append("t=${timestamp}ms $bounded")
+            val dropped=evidenceDropped.getAndSet(0)
+            if(dropped>0) evidence.append("Diagnostic queue overflow: omitted=$dropped")
+            val target=evidenceFile ?: return@execute
+            val now=android.os.SystemClock.elapsedRealtime()
+            val urgent=bounded.contains("failure",true) || bounded.contains("ended",true) || bounded.contains("closed",true)
+            if(lastEvidenceWrite!=0L && now-lastEvidenceWrite<5000 && !urgent) return@execute
+            try {
+                // One writer; atomic replacement keeps the last complete snapshot on restart.
+                val temporary=File(target.parentFile,target.name+".tmp")
+                temporary.writeText(evidence.snapshot(),Charsets.UTF_8)
+                if(!temporary.renameTo(target)) temporary.delete()
+                lastEvidenceWrite=now
+            } catch(_:Exception) { /* Export still includes in-memory evidence if storage is unavailable. */ }
+        } } catch(_:java.util.concurrent.RejectedExecutionException) { evidenceDropped.incrementAndGet() }
+    }
+    private fun log(message:String) { retain(message); synchronized(logHistory) { logHistory.append(message).append('\n'); if(logHistory.length>60000) logHistory.delete(0,12000) }; LegacySessionService.instance?.log(message) }
     fun setSurface(value:Surface?,force:Boolean=false) { if((surface !== value || force) && value != null) nextFrame.set(true); surface=value; media?.setSurface(value,force) }
     private fun <T:Closeable> own(value:T, expected:Int=workingGeneration):T { synchronized(resources) { if(!running.get() || expected!=generation.get()) { value.close(); error("USB stopped") }; resources.add(value) }; return value }
     private val poll=object:Runnable { override fun run() {
         if(!running.get()) return
         if(selectedName==null && !denied) discover()
         media?.let { log(it.diagnosticSummary()) }
+        log(VideoDiagnosticGate.summary())
+        log(AudioDiagnosticDispatcher.summary())
         main.postDelayed(this,5000)
     } }
     private val receiver=object:BroadcastReceiver() { override fun onReceive(context:Context,intent:Intent) {
@@ -59,14 +95,21 @@ class LegacyWiredService : VpnService() {
                 else { denied=true; log("USB permission denied; reconnect cable or select USB to retry") }
             }
             UsbManager.ACTION_USB_DEVICE_ATTACHED -> if(selectedName==null && !denied) discover()
-            UsbManager.ACTION_USB_DEVICE_DETACHED -> if(device.deviceName==selectedName) {
-                log("USB detached"); generation.incrementAndGet(); cleanup(); selectedName=null; activeSession=null
+            UsbManager.ACTION_USB_DEVICE_DETACHED -> if(device.deviceName==selectedName && !detaching) {
+                log("USB detached")
+                endTransport("USB detached")
             }
         }
     } }
     private val permissionAction get()="$packageName.USB_PERMISSION"
     override fun onCreate() {
-        super.onCreate(); instance=this; surface=videoSurface; usb=getSystemService(USB_SERVICE) as UsbManager
+        super.onCreate()
+        UsbReceiveDiagnostics.depth=UsbReceiveDiagnostics.sanitize(getSharedPreferences("receiver-ui",0).getInt("usbInRequests",8))
+        VideoDiagnosticGate.reset()
+        evidenceFile=File(filesDir,"usb-transport-evidence.txt")
+        previousEvidence=TransportEvidence.readPrevious(evidenceFile!!)
+        evidence.append("DiPlay 0.2.36 USB evidence; elapsed timestamps; structural metadata only")
+        instance=this; surface=videoSurface; usb=getSystemService(USB_SERVICE) as UsbManager
         registerReceiver(receiver,IntentFilter(permissionAction).apply { addAction(UsbManager.ACTION_USB_DEVICE_ATTACHED); addAction(UsbManager.ACTION_USB_DEVICE_DETACHED) })
     }
     override fun onStartCommand(intent:Intent?,flags:Int,startId:Int):Int {
@@ -99,7 +142,7 @@ class LegacyWiredService : VpnService() {
             workingGeneration=id
             try { startStack(device,id) }
             catch(error:Exception) {
-                if(id==generation.get() && running.get()) { log("USB stage failed: ${error.javaClass.simpleName}"); FailureDiagnostics.lines("USB",error).forEach(::log) }
+                if(id==generation.get() && running.get()) { log("USB stage failed: ${error.javaClass.simpleName} reason=${error.message?.take(200)}"); FailureDiagnostics.lines("USB",error).forEach(::log) }
                 cleanup(); if(id==generation.get()) selectedName=null
             }
         }
@@ -121,23 +164,32 @@ class LegacyWiredService : VpnService() {
                 val response=ByteArray(1)
                 val result=first.controlTransfer(0xc0,0x52,0,4,response,1,1000)
                 log("USB Apple vendor transition request result=$result; waiting for re-enumeration")
-                check(result>=0) { "USB vendor transition failed" }
+                check(result==response.size) { "USB vendor transition transferred $result of ${response.size} bytes" }
                 return
             }
-            check(LegacyUsbPlatform.selectConfiguration(first,configuration.id)) { "USB SET_CONFIGURATION failed" }
+            if(!LegacyUsbPlatform.selectConfiguration(first,configuration.id,::log)) {
+                // Match upstream: a reported configuration failure is logged, but
+                // interface claim remains the decisive host-side availability test.
+                log("USB configuration selection reported failure; attempting USBMUX claim as upstream")
+            }
             val muxInterface=IphoneCarPlayConfiguration.usbMuxInterface(configuration) ?: error("USBMUX interface absent")
             val endpoints=IphoneCarPlayConfiguration.usbMuxEndpoints(muxInterface) ?: error("USBMUX endpoints absent")
-            check(first.claimInterface(muxInterface,true)) { "USBMUX claim failed" }
+            log("USBMUX claim: config=${configuration.id} interface=${muxInterface.id} alternate=${LegacyUsbPlatform.alternate(muxInterface)} endpoints=${muxInterface.endpointCount}")
+            check(first.claimInterface(muxInterface,true)) { "USBMUX claim failed (config=${configuration.id}, interface=${muxInterface.id}); possible kernel or OEM interface ownership" }
             log("USB configuration=${configuration.id}; USBMUX interface=${muxInterface.id}; bulk endpoints selected")
             val pipe=own(Iap2UsbSession(first,endpoints.first,endpoints.second)); transferred=true
-            val mux=own(Iap2UsbMuxHost.open(pipe)); log("USBMUX ready")
             val ncmConnection=usb.openDevice(device) ?: error("NCM open failed")
+            UsbReceiveDiagnostics.depth=UsbReceiveDiagnostics.sanitize(getSharedPreferences("receiver-ui",0).getInt("usbInRequests",8))
             val function=NcmFunctionDiscovery.find(configuration)
             if(function==null) { ncmConnection.close(); error("CDC NCM function absent") }
-            val ncm=own(NcmUsbBridge.open(ncmConnection,function)); log("NCM interfaces claimed; data alternate setting selected")
+            log("NCM requested: control=${function.control.id}/${LegacyUsbPlatform.alternate(function.control)} data=${function.data.id}/${LegacyUsbPlatform.alternate(function.data)}")
+            log(UsbLinkSpeed.read(device.deviceName,device.vendorId,device.productId))
+            val ncm=own(NcmUsbBridge.open(ncmConnection,function,::log)); log("NCM interfaces claimed; data alternate setting selected")
+            val mux=own(Iap2UsbMuxHost.open(pipe)); log("USBMUX ready")
             val prefs=getSharedPreferences("receiver-usb",MODE_PRIVATE)
             val hostId=prefs.getString("hostId",null) ?: UUID.randomUUID().toString().toUpperCase(Locale.US).also { prefs.edit().putString("hostId",it).commit() }
             val buid=prefs.getString("buid",null) ?: UUID.randomUUID().toString().toUpperCase(Locale.US).also { prefs.edit().putString("buid",it).commit() }
+            log("Lockdown TLS backend: BC lightweight TLS1.2; dedicated USB pairing identity; system TLS unchanged")
             log("Lockdown pairing: unlock iPhone and confirm Trust if prompted")
             val records=LegacyPairRecords(this)
             fun pair():LockdownPairRecord = LockdownPairingClient(mux).pair("DiPlay Legacy",hostId,buid,120000) { !running.get() || id!=generation.get() }.pairRecord.also { records.save(it) }
@@ -155,7 +207,10 @@ class LegacyWiredService : VpnService() {
             val hostMac=ncm.hostMac ?: byteArrayOf(2,0,0,0,0,43)
             val literal="fe80::2"
             val tun=own(Builder().addAddress(literal,64).addRoute("fe80::",64).setSession("DiPlay USB").setMtu(1500).establish() ?: error("VPN TUN rejected"))
-            own(Ipv6NcmBridge(ncm,tun,hostMac, { error -> log("NCM IPv6 failure=${error.javaClass.simpleName}"); main.post { if(id==generation.get()) { generation.incrementAndGet(); cleanup(); selectedName=null } } }, ::log)).start()
+            val directAudio=own(DirectAudioRouter.open(InetAddress.getByName(literal),getSharedPreferences("receiver-ui",0).getBoolean("usbDirectAudio",true)))
+            log("USB audio ingress mode=${if(directAudio.enabled)"direct-with-socket-fallback" else "socket"}; authentication unchanged")
+            own(KernelAudioDiagnostics(android.os.Process.myUid(),::log))
+            own(Ipv6NcmBridge(ncm,tun,hostMac, { error -> log("NCM IPv6 failure=${error.javaClass.simpleName} reason=${error.message?.take(200)}"); FailureDiagnostics.lines("NCM",error).forEach(::log); main.post { if(id==generation.get()) endTransport("NCM failure") } }, ::log,directAudio)).start()
             log("NCM IPv6 TUN established (SDK18 nonblocking mode)")
             val identity=LegacyWirelessController.loadIdentity(this)
             val authDir=File(filesDir,"offline-mfi").apply { mkdirs() }
@@ -164,42 +219,70 @@ class LegacyWiredService : VpnService() {
             val deviceId=hostMac.joinToString(":") { "%02X".format(it.toInt() and 255) }
             val config=AirPlayConfig("DiPlay Legacy",deviceId,android.bluetooth.BluetoothAdapter.getDefaultAdapter()?.address ?: deviceId,"950.7.1",display,
                 rightHandDrive=settings.rightHandDrive, hevc=settings.hevc&&CodecCapabilities.hevc(), opus=settings.opus&&CodecCapabilities.opus(),microphone=settings.microphone,icons=LegacyOem.icons(),oemLabel="DiPlay",manufacturer="DiPlay Legacy",model="iMX6-Android43")
-            val sink=own(LegacyMediaSink(::log,{ if(nextFrame.compareAndSet(true,false)) { log("USB first video frame rendered"); LegacySessionService.instance?.frameObserver?.invoke() } },display.widthPixels,display.heightPixels,settings,this)); media=sink; sink.setSurface(surface)
+            val bindAddress=LegacyBindAddress.wired(literal,{ !running.get() || id!=generation.get() },::log)
+            val sink=own(LegacyMediaSink(::log,{ if(nextFrame.compareAndSet(true,false)) { log("USB first video frame rendered"); LegacySessionService.instance?.frameObserver?.invoke() } },display.widthPixels,display.heightPixels,settings,this,bindAddress)); media=sink; sink.setSurface(surface)
             val engine=CarPlayMediaEngine(sink,microphoneEnabled=settings.microphone)
             val pairPrefs=getSharedPreferences("receiver-pairings",MODE_PRIVATE)
             val pairings=PairingStore { id,key -> pairPrefs.edit().putString(id,android.util.Base64.encodeToString(key,2)).commit() }
             pairPrefs.all.forEach { (id,value)-> if(value is String) runCatching { pairings.save(id,android.util.Base64.decode(value,2)) } }
-            val server=ServerSocket(); server.reuseAddress=true; server.bind(InetSocketAddress(InetAddress.getByName("::"),config.port))
-            own(Closeable { server.close() })
+            val server=ServerSocket()
+            own(Closeable { server.close() }) // Own before bind: failure must release the socket too.
+            server.reuseAddress=true
+            server.bind(InetSocketAddress(bindAddress,config.port))
+            log("USB AirPlay listener ready: scope=${bindAddress.scopeId} port=${server.localPort}")
             Thread({ try { while(running.get() && id==generation.get()) {
                 val socket=server.accept(); socket.tcpNoDelay=true
                 own(AirPlaySession(socket,config,identity,pairings,mfi,object:AirPlaySessionListener {
                     override fun onSessionActive(session:AirPlaySession) { if(id==generation.get()) { activeSession=session; log("USB AirPlay active") } }
-                    override fun onSessionEnded(session:AirPlaySession) { if(activeSession===session) activeSession=null; log("USB AirPlay ended") }
+                    override fun onSessionEnded(session:AirPlaySession) {
+                        val wasActive=activeSession===session
+                        if(wasActive) activeSession=null
+                        log("USB AirPlay ended")
+                        if(wasActive) main.post { if(id==generation.get() && activeSession==null && !detaching) connectionEndedObserver?.invoke() }
+                    }
                     override fun onDebugLog(message:String) { AirPlayDiagnostics.summary(message)?.let(::log) }
                     override fun onHostUiRequested(session:AirPlaySession) { startActivity(Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_HOME).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) }
                     override fun onControlFailure(stage:String,error:Throwable) { log("USB AirPlay failure stage=$stage class=${error.javaClass.simpleName}") }
                 },engine),id).start()
             } } catch(error:Exception) { if(running.get()) log("USB AirPlay listener ended ${error.javaClass.simpleName}") } },"legacy-wired-airplay").apply { isDaemon=true; start() }
             val location=if(settings.gps) own(LegacyVehicleLocationProvider(this,"USB",::log)) else null
-            val identification=Iap2IdentificationConfig("DiPlay Legacy","iMX6-Android43","DiPlay Legacy",identity.pairingId,"0.21","iMX6", carPlayUsbInterfaceNumber=muxInterface.id).copy(locationInformationEnabled=settings.gps,vehicleSpeedEnabled=settings.gps && VehicleSpeedPolicy.gearMap(getSharedPreferences("receiver-ui",0).getString("vehicleGearMap", "") ?: "").isNotEmpty())
+            val identification=Iap2IdentificationConfig("DiPlay Legacy","iMX6-Android43","DiPlay Legacy",identity.pairingId,"0.2.36","iMX6", carPlayUsbInterfaceNumber=muxInterface.id).copy(locationInformationEnabled=settings.gps,vehicleSpeedEnabled=settings.gps && VehicleSpeedPolicy.gearMap(getSharedPreferences("receiver-ui",0).getString("vehicleGearMap", "") ?: "").isNotEmpty())
             val endpoint=Iap2WiredCarPlayEndpoint(listOf(literal),config.port,identity.publicKeyHex,config.sourceVersion,deviceId)
             log("Wired iAP2 authentication / StartCarPlaySession")
             Iap2WiredControlClient(iap,Iap2MfiAuthenticationClient(mfi)).run(identification,endpoint,availableCurrentMilliAmps=500,
-                timeoutMillis=24*60*60*1000L,locationProvider=location,onProgress={ log(FailureDiagnostics.progress(it)) })
+                timeoutMillis=Iap2WiredControlClient.NO_TIMEOUT_MILLIS,locationProvider=location,onProgress={ log(FailureDiagnostics.progress(it)) })
         } finally {
             if(!transferred) first.close()
             cleanup(); if(id==generation.get()) selectedName=null
         }
+    }
+    /** Main-thread state transition; slow resource closure is isolated from UI events. */
+    private fun endTransport(reason:String) {
+        if(detaching || !running.get()) return
+        detaching=true
+        val endedGeneration=generation.incrementAndGet()
+        activeSession=null
+        media?.let { log("USB final media: "+it.diagnosticSummary()) }
+        log("USB connection ended: $reason; returning to application UI")
+        connectionEndedObserver?.invoke()
+        Thread({
+            cleanup()
+            main.post {
+                if(running.get() && endedGeneration==generation.get()) {
+                    selectedName=null;pendingPermission=null;detaching=false
+                }
+            }
+        },"legacy-usb-cleanup").apply { isDaemon=true;start() }
     }
     private fun cleanup() {
         val values=synchronized(resources) { resources.toList().reversed().also { resources.clear() } }
         values.forEach { runCatching { it.close() } }; media=null; activeSession=null
     }
     override fun onRevoke() { log("VPN permission revoked"); stopSelf(); super.onRevoke() }
-    override fun onDestroy() { running.set(false); generation.incrementAndGet(); main.removeCallbacks(poll); unregisterReceiver(receiver); cleanup(); worker.shutdownNow(); instance=null; super.onDestroy() }
+    override fun onDestroy() { running.set(false); generation.incrementAndGet(); main.removeCallbacks(poll); unregisterReceiver(receiver); cleanup(); worker.shutdownNow(); evidenceWriter.shutdown(); instance=null; super.onDestroy() }
     companion object {
         @Volatile var instance:LegacyWiredService?=null
+        @Volatile var connectionEndedObserver:(()->Unit)?=null
         @Volatile private var videoSurface:Surface?=null
         fun setVideoSurface(value:Surface?,force:Boolean=false) { videoSurface=value; instance?.setSurface(value,force) }
     }

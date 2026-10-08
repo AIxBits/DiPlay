@@ -33,6 +33,8 @@ object AirPlayDiagnostics {
     }
     private val endpoints = listOf("/pair-setup", "/pair-verify", "/auth-setup", "/info", "/command", "/feedback")
     fun summary(message: String): String? {
+        if (message.length<=1600 && (message.startsWith("Receive: audio type=") || message.startsWith("Audio UDP receive buffer type=") || message.startsWith("Audio ingress type=") || message.startsWith("Audio queue ") || message.startsWith("Audio backend type=") || message.startsWith("Audio control type=") || message.startsWith("Audio retransmission type=")) &&
+            Regex("[A-Za-z0-9= .:\\[\\]_-]+").matches(message)) return message
         if (Regex("^receiver siri request down=(true|false) up=(true|false)$").matches(message)) return "Siri上游请求写入：" + message.removePrefix("receiver siri request ")
         if (Regex("^receiver audio requested type=[0-9]+ purpose=(media|telephony|speechrecognition|alert|default|compatibility|其他) microphoneEnabled=(true|false)$").matches(message)) return "手机音频SETUP请求：" + message.removePrefix("receiver audio requested ")
         if (message == "receiver microphone negotiated waitingForAudio=true") return "麦克风已协商：按原仓库等待音频首包后启动录音"

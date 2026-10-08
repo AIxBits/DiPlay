@@ -1,22 +1,38 @@
-DiPlay Android 4.3 receiver — v0.21 experimental
-Baseline: upstream DiPlay 0.2.8 / f2d06951. Implementation and hardware acceptance are separate.
+DiPlay Android 4.3 — 0.16 experimental
+Reference: upstream 0.2.8 / f2d06951. Implementation status and hardware acceptance are separate.
 
-Reported on one Android4.3/i.MX6 firmware: wireless picture, H.264 full-screen video, touch, music, navigation synchronization/announcements, Siri invocation, steering-button delivery and independently readable vehicle GPS. Version0.21 display recovery was reported working. Other firmware is not guaranteed.
+Previously confirmed on this head unit:
+• Wireless CarPlay through the existing hotspot; full-screen H.264 display and touch.
+• Music, navigation synchronization/announcements and Siri invocation.
+• Steering voice button callback; independent head-unit GPS fixes.
+• Three diagnostic tones on the Android music/call/notification streams.
+Baidu navigation behavior has been accepted; no further navigation investigation is requested.
 
-Settings: upstream-style native groups, manual wireless/USB selection, optional automatic connection, display scale/frame rate/physical size/safe area/full-screen, audio focus, buffer/volume and independent media/navigation streams0–20 with previews. Existing diagnostic tools remain available.
+Newly integrated in 0.16, awaiting hardware acceptance:
+• Wired USBMUX/Lockdown/carkit/iAP2 and NCM/IPv6 VPN path.
+• Saved hotspot, app-managed WPA2 hotspot, Wi-Fi Direct group owner and shared WPA2 router modes.
+• Upstream audio channel mapping, SDK18 audio focus, app volume and 300/500/1000 ms media buffer.
+• Optional navigation music ducking; OFF by default, preserving upstream overlay behavior.
+• Configurable resolution, 30–60 FPS, upstream 0.3x–1.0x display scale, physical dimensions and basis, independent safe-area edges, outside-safe-area drawing and right-hand drive.
+• Foreground wireless session service; Surface reattachment, background audio/GPS, disconnect retry with bounded backoff and optional boot connection.
+• OEM CarPlay return icon and Android launcher return.
+• Steering short press opens CarPlay; long press invokes Siri (MCU221 or timed window long press). New split needs real verification: earlier logs only contain MCU93. If both physical presses report 93 without timing, they cannot be distinguished by this callback.
+• Native API18 settings using original English/Chinese/Arabic/Spanish/Russian strings and system-language selection.
 
-Projection recovery: show the target before waiting for a first frame; force Surface attachment on projection return and changed Surface dimensions. A released output buffer does not prove visible panel output.
+Capability-dependent, not guaranteed on this firmware:
+• HEVC decoder and Opus decoder/encoder paths are implemented. The app only advertises them when enabled AND the platform codecs exist. The supplied firmware has no verified HEVC/Opus codecs; there is no bundled software codec.
+• USB Host, CDC-NCM, IPv6 and TUN are enabled in the supplied firmware. That does not prove the installed firmware, physical USB wiring or the complete wired session. Use the car's single USB port; no physical-port switch is required.
+• USB mode may require system USB/VPN permission and iPhone Trust/CarPlay approval.
+• Wi-Fi Direct/managed hotspot behavior and radio band depend on the vendor driver; SDK18 cannot reproduce newer LocalOnlyHotspot/band controls.
+• Compose/AndroidX visuals are reimplemented with native widgets; exact original appearance is not claimed.
 
-Voice button: recognized MCU click opens DiPlay when disconnected and invokes upstream Siri when connected. Separate physical long-press behavior is not implemented.
+Still unverified or outside this merge:
+• Reliable microphone uplink / Siri recognition, bidirectional calls, iPhone use of vehicle GPS and phone Live Activities.
+• ABS/CAN vehicle speed: read-only CarinfoService integration; valid speed feeds RMC. Original PASCD is gated by a verified P/R/N/D map and phone subscription. Rear-wheel pulse counters found in lower-level firmware; conversion not implemented. Battery and instrument/HUD integration remain unavailable.
+• iOS 27 parked video: cannot validate against the user's iOS 16.6.1.
+• Force-stopped apps and vendor process killing cannot be bypassed by a foreground service.
 
-GPS/CAN: valid Android GPS through upstream GGA/RMC. Read-only OEM ABS/CAN getters; independent PASCD requires verified gear mapping and phone subscription. iPhone adoption is unverified; wheel-pulse conversion is not implemented.
+Testing:
+Keep the working hotspot first; verify wireless music/Siri, return to car launcher and reopen, then reconnect and optional boot-connect. Test USB and other network modes separately. Settings take effect on reconnect. Export includes Activity, background session and wired-stage logs; it does not store microphone recordings, navigation coordinates, router passwords, pairing keys or phone transcripts.
 
-Implemented but hardware-dependent: USBMUX/Lockdown/carkit/iAP2, NCM/IPv6/VPN; managed hotspot, Wi-Fi Direct and shared-router modes; HEVC/Opus only with installed codecs. Controls do not prove device support.
-
-Still requiring evidence: full Wi-Fi iAP2 handoff, sustained microphone recognition, telephone duplex audio, every OEM audio stream, long-session/reboot recovery and iPhone Live Activities.
-
-Not provided: BYD HUD/cluster, Android11 embedded maps, upstream Home sample, battery data and completed platform/core/vehicle-layer refactor.
-
-Reverse Assist and PlatformService: current process-error snapshots may supply an exception stack. Missing records are inconclusive. The OEM service crash cause remains unresolved; this app does not modify the reverse-camera service.
-
-Reports remain local until deliberately shared. Source excludes identities and signing keys; the release APK includes upstream's experimental runtime identity, which is extractable. This is not an Apple-certified product.
+Vehicle-speed diagnostics: Menu → Diagnostics → CAN speed and raw gear (60 seconds). Configure only verified P/R/N/D codes, then reconnect. Firmware reads and phone adoption require hardware tests.

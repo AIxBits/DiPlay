@@ -137,7 +137,7 @@ class LegacyWirelessController(private val context: Context, private val sink: L
                 manufacturer = "DiPlay Legacy", model = "iMX6-Android43", oemLabel = "DiPlay")
             val media = CarPlayMediaEngine(sink, microphoneEnabled = microphone)
             val identification = Iap2IdentificationConfig("DiPlay Legacy", "iMX6-Android43", "DiPlay Legacy",
-                identity.pairingId, "0.21", "iMX6", Iap2WirelessIdentification(btMac, access.ssid)).copy(locationInformationEnabled = gpsEnabled, vehicleSpeedEnabled = gpsEnabled && VehicleSpeedPolicy.gearMap(context.getSharedPreferences("receiver-ui",0).getString("vehicleGearMap", "") ?: "").isNotEmpty())
+                identity.pairingId, "0.2.36", "iMX6", Iap2WirelessIdentification(btMac, access.ssid)).copy(locationInformationEnabled = gpsEnabled, vehicleSpeedEnabled = gpsEnabled && VehicleSpeedPolicy.gearMap(context.getSharedPreferences("receiver-ui",0).getString("vehicleGearMap", "") ?: "").isNotEmpty())
             val channel = access.channel
             if (channel == 0) log("热点信道未知，将按上游允许的未知信道值尝试连接")
             step("准备无线启动参数")

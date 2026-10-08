@@ -46,3 +46,7 @@ release-signing.properties
 /adaptation/device-reports/
 /analysis/
 *.zip
+
+# Generated Python caches may contain local build paths.
+__pycache__/
+*.pyc

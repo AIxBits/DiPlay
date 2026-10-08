@@ -14,7 +14,10 @@ with ZipFile(sdk) as platform:
     platform_bytes = {name[:-6]: platform.read(name) for name in platform.namelist() if name.endswith('.class')}
 with ZipFile(apk) as package:
     assert package.testzip() is None
-    assert not any(name.startswith('lib/') for name in package.namelist())
+    native_names = [name for name in package.namelist() if name.startswith('lib/')]
+    assert native_names == ['lib/armeabi-v7a/libdiplay_usb.so']
+    from verify_native import verify as verify_native
+    verify_native(package.read(native_names[0]))
     dex_names = [name for name in package.namelist() if name.endswith('.dex')]
     assert dex_names == ['classes.dex'], 'API18 build must be single-DEX'
     data = package.read('classes.dex')
@@ -67,7 +70,7 @@ with ZipFile(apk) as package:
     assert startup_debug_found, 'Startup stack line information missing'
     # DEX VM annotations are encoded metadata, not classes applications load from android.jar.
     vm_annotations = {'Ldalvik/annotation/' + name + ';' for name in
-                      ['EnclosingClass', 'EnclosingMethod', 'InnerClass', 'MemberClasses', 'Signature']}
+                      ['EnclosingClass', 'EnclosingMethod', 'InnerClass', 'MemberClasses', 'Signature', 'Throws']}
     missing = sorted(t for t in types if t.startswith(('Ljava/', 'Ljavax/', 'Landroid/', 'Ldalvik/')) and t not in available and t not in defined and t not in vm_annotations)
     assert not missing, 'Platform types unavailable on SDK18: ' + str(missing)
     cache = {}
@@ -132,13 +135,17 @@ with ZipFile(apk) as package:
         if not exists(owner[1:-1], strings[name_id], types[type_id], 'field'):
             unavailable.append(owner + '->' + strings[name_id] + ':' + types[type_id])
     assert not unavailable, 'Platform members unavailable on SDK18: ' + str(unavailable)
-    auth = os.environ.get('DIPLAY_AUTH_ASSETS_DIR')
-    names = ['identity.pk8', 'certificate.p7b']
-    if auth:
-        for name in names:
-            assert package.read('assets/offline-mfi/' + name) == (Path(auth)/'offline-mfi'/name).read_bytes()
-    else:
-        assert not any(name.startswith('assets/offline-mfi/') for name in package.namelist()), 'Unexpected runtime identity'
+    identity_names={'assets/offline-mfi/identity.pk8','assets/offline-mfi/certificate.p7b'}
+    present=identity_names.intersection(package.namelist())
+    assert not present or present==identity_names, 'Incomplete runtime identity'
+    if present:
+        explicit=os.environ.get('DIPLAY_AUTH_ASSETS_DIR')
+        assert explicit, 'Set DIPLAY_AUTH_ASSETS_DIR to verify intentional runtime inputs'
+        for name in identity_names:
+            assert package.read(name)==(Path(explicit)/'offline-mfi'/Path(name).name).read_bytes()
+    for name in package.namelist():
+        if name.startswith('assets/') and Path(name).suffix.lower() in {'.pk8','.p7b','.pem','.key','.jks','.keystore','.p12','.pfx'}:
+            assert name in identity_names, 'Unexpected credential container in APK assets'
     print('PASS: SDK18 platform references, DEX035, single DEX, CRC, explicit runtime assets, mDNS reflection, stack line metadata')
     print('DEX method references:', u32(88))
 print('APK SHA256:', hashlib.sha256(apk.read_bytes()).hexdigest())

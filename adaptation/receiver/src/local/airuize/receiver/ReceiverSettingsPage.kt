@@ -11,7 +11,8 @@ import android.widget.*
 class ReceiverSettingsPage(private val activity:Activity,private val log:(String)->Unit,
     private val phone:()->Unit,private val usb:()->Unit,private val export:()->Unit,
     private val logs:()->Unit,private val diagnostics:()->Unit,private val mediaTest:()->Unit,
-    private val audioTest:()->Unit,private val preview:(Int)->Unit,private val apply:()->Unit) {
+    private val audioTest:()->Unit,private val preview:(Int)->Unit,private val apply:()->Unit,
+    private val upload:()->Unit,private val retryUpload:()->Unit,private val uploadDescription:()->Unit,private val clearUploads:()->Unit) {
     private val p=activity.getSharedPreferences("receiver-ui",0)
     private val s=ReceiverSettings.read(activity)
     private val strings=LegacyStrings(activity)
@@ -58,7 +59,19 @@ class ReceiverSettingsPage(private val activity:Activity,private val log:(String
             button(box,tr("使用 USB 连接","Connect with USB"),usb)
         }
         section(parent,tr("诊断","Diagnostics")) { box ->
+            toggle(box,"usbDirectAudio",tr("有线音频直接投递（重连后生效）","Direct wired audio delivery (reconnect required)"),p.getBoolean("usbDirectAudio",true))
+            choice(box,"usbInRequests",tr("USB 接收请求数量（重连后生效）","USB IN request depth (reconnect required)"),listOf(1,8,16),listOf("1 · reference","8 · default","16 · diagnostic"),UsbReceiveDiagnostics.sanitize(p.getInt("usbInRequests",8)))
+            button(box,tr("暂停／恢复视频接收（30秒音频对照）","Pause/resume video reception (30s audio comparison)")) {
+                val paused=VideoDiagnosticGate.toggle()
+                log("NCM video diagnostic TCP-read pause=$paused durationLimitSeconds=30; audio unchanged")
+                android.widget.Toast.makeText(activity,if(paused)tr("视频接收暂停30秒，保持音乐播放后保存日志","Video receive paused for 30s; keep music playing and save logs") else tr("视频接收已恢复","Video reception resumed"),android.widget.Toast.LENGTH_LONG).show()
+            }
             button(box,tr("保存诊断报告","Save diagnostic report"),export)
+            button(box,tr("上传日志","Upload log"),upload)
+            button(box,tr("重试待上传日志","Retry pending uploads"),retryUpload)
+            button(box,tr("填写上传的问题描述","Upload issue description"),uploadDescription)
+            button(box,tr("清空待上传日志","Clear pending uploads"),clearUploads)
+            text(box,tr("离线时保存脱敏日志，联网后手动重试；不会自动上传。","Sanitized logs stay queued offline; retry manually when online. No automatic uploads."))
             button(box,tr("选择报告保存文件夹","Choose report folder"),::reportFolder)
             button(box,tr("查看日志","View logs"),logs)
             button(box,tr("功能诊断与车辆检测","Diagnostics and vehicle tests"),diagnostics)
@@ -106,7 +119,10 @@ class ReceiverSettingsPage(private val activity:Activity,private val log:(String
             button(box,tr("打开应用系统设置","Open app system settings")) { open(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS,true) }
         }
         section(parent,tr("关于与适用范围","About and compatibility")) { box ->
-            text(box,"DiPlay adaptation 0.21 · Android ${android.os.Build.VERSION.RELEASE}")
+            button(box,tr("检查更新","Check updates")) { ReceiverUpdate(activity,log).check() }
+            button(box,tr("更新服务地址","Update service address")) { ReceiverUpdate(activity,log).configure() }
+            text(box,tr("手动检查；不会自动下载或安装。","Manual checks; no automatic download or installation."))
+            text(box,"DiPlay adaptation 0.2.36 · Android ${android.os.Build.VERSION.RELEASE}")
             text(box,tr("协议基于原 DiPlay。比亚迪仪表、Android 11 地图嵌入和原版 Home 示例尚不适用于此适配版。","Protocol based on DiPlay. BYD cluster functions, Android11 map embedding and the upstream Home sample are not implemented in this adaptation."))
         }
         button(parent,tr("应用设置并重新连接","Apply settings and reconnect"),apply)

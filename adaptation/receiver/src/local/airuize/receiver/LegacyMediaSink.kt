@@ -19,7 +19,7 @@ import java.util.concurrent.atomic.AtomicBoolean
 /** API18 codecs are owned exclusively by their workers, including configure/stop/release. */
 class LegacyMediaSink(private val log: (String) -> Unit, private val rendered: () -> Unit,
     private val videoWidth: Int = 800, private val videoHeight: Int = 480,
-    private val settings: ReceiverSettings = ReceiverSettings(), context: android.content.Context? = null) : MediaSink, Closeable {
+    private val settings: ReceiverSettings = ReceiverSettings(), context: android.content.Context? = null, private val localNetworkAddress:java.net.InetAddress? = null) : MediaSink, Closeable {
     private val surfaceState=VideoSurfaceState<Surface>()
     private val configuration = VideoConfigState()
     @Volatile private var videoCodec = VideoCodec.H264
@@ -29,7 +29,7 @@ class LegacyMediaSink(private val log: (String) -> Unit, private val rendered: (
     private val resync = AtomicBoolean(true)
     private val closed = AtomicBoolean(false)
     val diagnostics = MediaDiagnostics()
-    private val audio = HashMap<AudioStreamId, LegacyAudio>()
+    private val audio = java.util.concurrent.ConcurrentHashMap<AudioStreamId, LegacyAudio>()
     private val microphones = HashMap<AudioStreamId, LegacyMicrophone>()
     private val worker = Thread({ videoLoop() }, "legacy-avc").apply { isDaemon = true; start() }
     @Synchronized fun diagnosticSummary(): String = diagnostics.summary() + "；当前音频流=${audio.size}；当前麦克风流=${microphones.size}；Surface有效=${surfaceState.snapshot.target?.isValid == true}；视频编码=$videoCodec；视频配置就绪=${configuration.snapshot!=null}；配置字节=${configuration.snapshot?.size ?: 0}；目标=${videoWidth}x${videoHeight}；fps=${settings.fps}" +
@@ -60,7 +60,7 @@ class LegacyMediaSink(private val log: (String) -> Unit, private val rendered: (
         log("音频流开始：type=${id.type}；codec=${format.codec}；rate=${format.sampleRate}；channels=${format.channels}；用途=${AudioDiagnostics.purpose(format.audioType)}")
         audio[id] = LegacyAudio(format, firstSample, log, diagnostics, settings, coordinator)
     }
-    @Synchronized override fun onAudioRtp(id: AudioStreamId, format: com.shilapi.xcertplay.airplay.AudioFormat, rtp: ByteArray, sample: Int) {
+    override fun onAudioRtp(id: AudioStreamId, format: com.shilapi.xcertplay.airplay.AudioFormat, rtp: ByteArray, sample: Int) {
         audio[id]?.offer(rtp, sample)
     }
     @Synchronized override fun onAudioStopped(id: AudioStreamId) { audio.remove(id)?.close() }
@@ -68,7 +68,7 @@ class LegacyMediaSink(private val log: (String) -> Unit, private val rendered: (
         microphones.remove(id)?.close()
         if (config.codec == AudioCodecKind.OPUS && !CodecCapabilities.opus()) { log("Opus encoder unavailable"); return }
         log("麦克风选路：用途=${AudioDiagnostics.purpose(config.audioType)}；AudioSource=${microphoneAudioSource(config.audioType)}（按原仓库用途选择）；codec=${config.codec}；rate=${config.sampleRate}；channels=${config.channels}；目标为iPhone上行（不记录地址或密钥）")
-        microphones[id] = LegacyMicrophone(config, log, diagnostics)
+        microphones[id] = LegacyMicrophone(config, log, diagnostics, localNetworkAddress)
     }
     @Synchronized override fun onMicrophoneStopped(id: AudioStreamId) { microphones.remove(id)?.close() }
     @Synchronized override fun close() {
@@ -187,25 +187,72 @@ private class LegacyAudio(private val format: com.shilapi.xcertplay.airplay.Audi
     private val written = java.util.concurrent.atomic.AtomicLong()
     private val dropped = java.util.concurrent.atomic.AtomicLong()
     private val selection = AudioChannelMapper.map(format.audioType, format.payloadType, AudioChannelMappingMode.MOBILE_COMPATIBLE, android.media.AudioManager.STREAM_MUSIC)
-    private val stream = AudioOverridePolicy.resolve(selection.channel.name,selection.streamType,settings.mediaChannel,settings.navigationChannel)
-    private val queue = ArrayBlockingQueue<Pair<ByteArray, Int>>(64)
+    private val automaticStream = LegacyAudioRoutePolicy.automatic(selection.channel.name,selection.streamType)
+    private val stream = AudioOverridePolicy.resolve(selection.channel.name,automaticStream,settings.mediaChannel,settings.navigationChannel)
+    private val queue = ArrayBlockingQueue<Pair<ByteArray, Int>>(192) // Pinned upstream MAX_QUEUED_PACKETS.
+    private val maxGapMs=java.util.concurrent.atomic.AtomicLong()
+    private val maxWriteMs=java.util.concurrent.atomic.AtomicLong()
+    private val sequenceGaps=java.util.concurrent.atomic.AtomicLong()
+    private val outOfOrder=java.util.concurrent.atomic.AtomicLong()
+    private val rebuffers=java.util.concurrent.atomic.AtomicLong()
+    private val packetBytes=java.util.concurrent.atomic.AtomicLong()
+    private val lastRtp=java.util.concurrent.atomic.AtomicLong()
+    private val latestSequence=java.util.concurrent.atomic.AtomicLong()
+    private val latestIntervalUs=java.util.concurrent.atomic.AtomicLong()
+    private val codecPollMaxUs=java.util.concurrent.atomic.AtomicLong()
+    private val pcmInspectMaxUs=java.util.concurrent.atomic.AtomicLong()
+    private val decodeMaxUs=java.util.concurrent.atomic.AtomicLong()
+    @Volatile private var outputState=-1
+    @Volatile private var outputPlayState=-1
+    @Volatile private var healthThread:Thread?=null
+    @Volatile private var playbackPriority:Int?=null
+    private val writeBusy=AtomicBoolean(false)
+    private val pcmSamples=java.util.concurrent.atomic.AtomicLong()
+    private val pcmPeak=java.util.concurrent.atomic.AtomicLong()
+    private val pcmClipped=java.util.concurrent.atomic.AtomicLong()
+    private val invalidPcm=java.util.concurrent.atomic.AtomicLong()
+    private val timeline=LegacyPcmTimeline(format.sampleRate,format.channels)
+    private var lastArrival=0L
+    private var lastSequence:Int?=null
+    private fun maximum(value:java.util.concurrent.atomic.AtomicLong,next:Long) {
+        var previous=value.get()
+        while(next>previous && !value.compareAndSet(previous,next)) previous=value.get()
+    }
     @Volatile private var track: AudioTrack? = null
     @Volatile private var actualStream = stream
     init { Thread({ run() }, "legacy-audio").apply { isDaemon = true; start() } }
-    fun summary(): String = "音频通道统计：用途=${AudioDiagnostics.purpose(format.audioType)}；type=${format.payloadType}；Android=${AudioDiagnostics.androidStreamName(actualStream)}($actualStream)；请求通道=$stream；RTP=${received.get()}；写入字节=${written.get()}；入队拒绝=${dropped.get()}；AudioTrack状态=${track?.state ?: -1}；播放状态=${track?.playState ?: -1}"
+    fun summary(): String = "音频通道统计：用途=${AudioDiagnostics.purpose(format.audioType)}；type=${format.payloadType}；Android=${AudioDiagnostics.androidStreamName(actualStream)}($actualStream)；请求通道=$stream；RTP=${received.get()}；写入字节=${written.get()}；入队拒绝=${dropped.get()}；AudioTrack状态=${outputState}；播放状态=${outputPlayState}；队列=${queue.size}/192；最大到包间隔ms=${maxGapMs.get()}；最大写入耗时ms=${maxWriteMs.get()}；RTP序号缺口=${sequenceGaps.get()}；PCM时间戳缺帧=${timeline.gapFrames}；PCM时间戳大跳变=${timeline.discontinuities}；重复或乱序=${outOfOrder.get()}；重缓冲=${rebuffers.get()}；PCM样本=${pcmSamples.get()}；PCM峰值=${pcmPeak.get()}；PCM满幅样本=${pcmClipped.get()}；PCM对齐异常=${invalidPcm.get()}（仅统计、不记录声音；序号缺口不等于永久丢包）"
     fun offer(bytes: ByteArray, sample: Int) {
         if (stopped.get()) return
         diagnostics.audioPackets.incrementAndGet()
         received.incrementAndGet()
-        if (!queue.offer(bytes.copyOf() to sample)) { diagnostics.audioDropped.incrementAndGet(); dropped.incrementAndGet(); log("音频缓冲溢出") }
+        val now=System.nanoTime()
+        if(lastArrival!=0L) {latestIntervalUs.set((now-lastArrival)/1000);maximum(maxGapMs,(now-lastArrival)/1_000_000L)}
+        lastArrival=now
+        lastRtp.set(sample.toLong() and 0xffffffffL)
+        if(bytes.size>=12) {
+            if(format.codec==AudioCodecKind.LPCM) timeline.received(sample,bytes.size-12)
+            val seq=((bytes[2].toInt() and 255) shl 8) or (bytes[3].toInt() and 255)
+            latestSequence.set(seq.toLong())
+            val previous=lastSequence
+            if(previous==null) lastSequence=seq else {
+                val distance=(seq-previous) and 65535
+                if(distance in 1..32767) { if(distance>1) sequenceGaps.addAndGet((distance-1).toLong());lastSequence=seq }
+                else outOfOrder.incrementAndGet()
+            }
+        }
+        val payloadBytes=(bytes.size-12).coerceAtLeast(0).toLong()
+        packetBytes.addAndGet(payloadBytes)
+        if (!queue.offer(bytes.copyOf() to sample)) {packetBytes.addAndGet(-payloadBytes); diagnostics.audioDropped.incrementAndGet(); dropped.incrementAndGet(); if(dropped.get()==1L)log("音频缓冲溢出（累计计数保留；不逐包输出）") }
     }
-    override fun close() { stopped.set(true); queue.clear(); try { track?.pause(); track?.flush() } catch (_: Exception) {} }
+    override fun close() { stopped.set(true);healthThread?.interrupt(); queue.clear(); try { track?.pause(); track?.flush() } catch (_: Exception) {} }
     private fun run() {
         var codec: MediaCodec? = null
         var inputs: Array<ByteBuffer>? = null
         var outputs: Array<ByteBuffer>? = null
         val info = MediaCodec.BufferInfo()
         try {
+            playbackPriority=android.os.Process.getThreadPriority(android.os.Process.myTid())
             val channels = if (format.channels == 1) android.media.AudioFormat.CHANNEL_OUT_MONO else android.media.AudioFormat.CHANNEL_OUT_STEREO
             val minimum = AudioTrack.getMinBufferSize(format.sampleRate, channels, android.media.AudioFormat.ENCODING_PCM_16BIT)
             require(minimum > 0) { "Audio output unavailable" }
@@ -215,18 +262,40 @@ private class LegacyAudio(private val format: com.shilapi.xcertplay.airplay.Audi
             var lastWrite = 0L
             val progress = AudioBufferProgress(format.channels * 2)
             var playing = false
+            var fadeApplied=false
             fun createTrack(channel:Int):AudioTrack {
                 val result=AudioTrack(channel, format.sampleRate, channels, android.media.AudioFormat.ENCODING_PCM_16BIT,plan.trackBufferBytes,AudioTrack.MODE_STREAM)
-                if(result.state!=AudioTrack.STATE_INITIALIZED) { result.release(); error("Audio stream unavailable") }
+                if(result.state!=AudioTrack.STATE_INITIALIZED) { result.release(); error("Audio stream $channel unavailable") }
                 return result
             }
             val output=try { createTrack(stream) } catch(error:Exception) {
-                if(stream==selection.streamType) throw error
-                log("自选音频通道不可用：$stream；回退自动通道=${selection.streamType}")
-                actualStream=selection.streamType
-                createTrack(selection.streamType)
+                if(stream==automaticStream) throw error
+                log("自选音频通道不可用：$stream；回退自动通道=$automaticStream")
+                actualStream=automaticStream
+                createTrack(automaticStream)
             }
             track = output
+            outputState=output.state;outputPlayState=output.playState
+            val occupancy=PlaybackOccupancy(format.sampleRate,format.channels)
+            healthThread=Thread({
+                var emptySamples=0L;var lateMaxMs=0L;var lastLog=0L
+                while(!stopped.get()) {
+                    val before=System.nanoTime()
+                    try {Thread.sleep(500)}catch(_:InterruptedException){break}
+                    if(stopped.get())break
+                    val now=System.nanoTime();lateMaxMs=maxOf(lateMaxMs,((now-before)/1000000L-500).coerceAtLeast(0))
+                    try {
+                        outputState=output.state;outputPlayState=output.playState
+                        val pending=occupancy.deviceBytes(written.get(),output.playbackHeadPosition)
+                        val deviceMs=occupancy.millis(pending)
+                        val packetMs=if(format.codec==AudioCodecKind.LPCM)occupancy.millis(packetBytes.get()) else -1L
+                        if(outputPlayState==AudioTrack.PLAYSTATE_PLAYING && pending==0L && queue.isEmpty() && !writeBusy.get())emptySamples++
+                        if(now-lastLog>=1000000000L) {lastLog=now
+                            log("Audio health timeMs=${now/1000000} type=${format.payloadType} codec=${format.codec} rate=${format.sampleRate} channels=${format.channels} seq=${latestSequence.get()} rtpTs=${lastRtp.get()} packetIntervalUs=${latestIntervalUs.get()} packetQueue=${queue.size} packetPcmMs=$packetMs deviceQueuedMs=$deviceMs deviceDelay=estimate writeBusy=${writeBusy.get()} nativeUnderrun=unavailable emptyPlayingSamples=$emptySamples rebuffers=${rebuffers.get()} pcmConvertMaxUs=${decodeMaxUs.get()} codecPollMaxUs=${codecPollMaxUs.get()} pcmInspectMaxUs=${pcmInspectMaxUs.get()} writeMaxMs=${maxWriteMs.get()} monitorLateMaxMs=$lateMaxMs playbackNice=${playbackPriority ?: 999}")
+                        }
+                    } catch(_:Exception) {if(stopped.get())break} // A stopped/released track is not a new audio error.
+                }
+            },"legacy-audio-health").apply {isDaemon=true;start()}
             val capacity = runCatching { AudioTrack::class.java.getDeclaredMethod("getNativeFrameCount").apply { isAccessible=true }.invoke(output) as Int }.getOrNull()?.times(format.channels*2)
             if(capacity != null && capacity > 0) startBytes = MediaAudioBuffer.startBytesFor(plan.startBytes, capacity, minOf(4096, capacity/2).coerceAtLeast(2))
             log("Audio buffer requested=${plan.trackBufferBytes} actual=${capacity ?: -1} start=$startBytes mediaMs=${settings.bufferMillis}")
@@ -249,17 +318,45 @@ private class LegacyAudio(private val format: com.shilapi.xcertplay.airplay.Audi
                 inputs = codec.inputBuffers; outputs = codec.outputBuffers
             }
             fun write(bytes: ByteArray) {
+                if(bytes.size%(format.channels*2)!=0) {
+                    if(invalidPcm.incrementAndGet()==1L) log("PCM输出未对齐：bytes=${bytes.size} channels=${format.channels}；跳过异常块，避免声道错位")
+                    return
+                }
+                val inspectBegin=System.nanoTime()
+                var peak=0L;var clipped=0L
+                for(pos in 0 until bytes.size-1 step 2) {
+                    val value=(bytes[pos].toInt() and 255) or (bytes[pos+1].toInt() shl 8)
+                    peak=maxOf(peak,kotlin.math.abs(value.toLong()))
+                    if(value==32767 || value == -32768) clipped++
+                }
+                pcmSamples.addAndGet((bytes.size/2).toLong());pcmClipped.addAndGet(clipped);maximum(pcmPeak,peak)
+                if(!fadeApplied && bytes.isNotEmpty()) {
+                    val samples=minOf(bytes.size/2,maxOf(1,format.sampleRate/100))
+                    for(i in 0 until samples) {
+                        val pos=i*2
+                        val sample=(bytes[pos].toInt() and 255) or (bytes[pos+1].toInt() shl 8)
+                        val scaled=(sample.toLong()*(i+1)/samples).toInt()
+                        bytes[pos]=scaled.toByte();bytes[pos+1]=(scaled shr 8).toByte()
+                    }
+                    fadeApplied=true // Same initial fade as upstream; no permanent attenuation.
+                }
+                maximum(pcmInspectMaxUs,(System.nanoTime()-inspectBegin)/1000)
                 var offset = 0
                 while (!stopped.get() && offset < bytes.size) {
                     if (!playing && bufferedBytes >= startBytes) { output.play(); playing = true }
-                    val count = output.write(bytes, offset, minOf(4096, bytes.size - offset))
+                    val begin=System.nanoTime()
+                    writeBusy.set(true)
+                    val count = try {output.write(bytes, offset, minOf(if(playing) bytes.size-offset else 2048, bytes.size - offset))} finally {writeBusy.set(false)}
+                    maximum(maxWriteMs,(System.nanoTime()-begin)/1_000_000L)
                     check(count > 0) { "Audio write failed" }; diagnostics.audioWrittenBytes.addAndGet(count.toLong()); written.addAndGet(count.toLong()); offset += count; bufferedBytes += count; progress.written(count); lastWrite = System.nanoTime(); if(!playing && bufferedBytes >= startBytes) { output.play(); playing=true }
                 }
             }
             fun drain() {
                 val decoder = codec ?: return
                 while (!stopped.get()) {
+                    val pollBegin=System.nanoTime()
                     val index = decoder.dequeueOutputBuffer(info, 0)
+                    maximum(codecPollMaxUs,(System.nanoTime()-pollBegin)/1000)
                     when {
                         index >= 0 -> {
                             try {
@@ -284,17 +381,18 @@ private class LegacyAudio(private val format: com.shilapi.xcertplay.airplay.Audi
             log("音频已启动：${format.codec}, ${format.sampleRate} Hz")
             while (!stopped.get()) {
                 drain()
-                val packet = queue.poll(20, TimeUnit.MILLISECONDS)
+                val packet = queue.poll(10, TimeUnit.MILLISECONDS)
                 if (packet == null) {
                     if(selection.channel == AudioChannel.MEDIA && playing && progress.queuedBytes(output.playbackHeadPosition) == 0L && System.nanoTime()-lastWrite > 100_000_000L) {
-                        output.pause(); playing=false; bufferedBytes=0
+                        output.pause(); playing=false; bufferedBytes=0;rebuffers.incrementAndGet()
                     }
                     if(!playing && bufferedBytes > 0 && System.nanoTime()-lastWrite >= 500_000_000L) { output.play(); playing=true }
                     continue
                 }
                 if (packet.first.size <= 12) continue
+                packetBytes.addAndGet(-(packet.first.size-12).toLong())
                 var payload = packet.first.copyOfRange(12, packet.first.size)
-                if (codec == null) { for (i in 0 until payload.size - 1 step 2) { val b = payload[i]; payload[i] = payload[i + 1]; payload[i + 1] = b }; write(payload) }
+                if (codec == null) {val begin=System.nanoTime(); for (i in 0 until payload.size - 1 step 2) { val b = payload[i]; payload[i] = payload[i + 1]; payload[i + 1] = b }; maximum(decodeMaxUs,(System.nanoTime()-begin)/1000);write(payload) }
                 else {
                     if (format.codec == AudioCodecKind.AAC_LC) payload = MediaCodecSupport.adtsFrame(payload, format.sampleRate, format.channels)
                     var index = -1
@@ -308,8 +406,9 @@ private class LegacyAudio(private val format: com.shilapi.xcertplay.airplay.Audi
                     codec.queueInputBuffer(index, 0, payload.size, pts, 0); drain()
                 }
             }
-        } catch (e: Exception) { log("音频失败：${e.javaClass.simpleName}") }
+        } catch (e: Exception) { log("音频失败：用途=${AudioDiagnostics.purpose(format.audioType)}；请求通道=$stream；实际通道=$actualStream；${e.javaClass.simpleName}；原因=${e.message?.take(160)}") }
         finally {
+            stopped.set(true);healthThread?.interrupt()
             log(summary())
             try { codec?.stop() } catch (_: Exception) {}; try { codec?.release() } catch (_: Exception) {}
             track?.let { coordinator.release(it) }
@@ -324,7 +423,7 @@ private fun microphoneAudioSource(audioType: String): Int = when (audioType.toLo
     "speechrecognition" -> MediaRecorder.AudioSource.VOICE_RECOGNITION
     else -> MediaRecorder.AudioSource.MIC
 }
-private class LegacyMicrophone(private val config: MicrophoneConfig, private val log: (String) -> Unit, private val diagnostics: MediaDiagnostics) : Closeable {
+private class LegacyMicrophone(private val config: MicrophoneConfig, private val log: (String) -> Unit, private val diagnostics: MediaDiagnostics, private val localAddress:java.net.InetAddress?) : Closeable {
     private val stopped = AtomicBoolean(false)
     @Volatile private var record: AudioRecord? = null
     @Volatile private var socket: DatagramSocket? = null
@@ -340,7 +439,10 @@ private class LegacyMicrophone(private val config: MicrophoneConfig, private val
             val recorder = AudioRecord(microphoneAudioSource(config.audioType), config.sampleRate, channel,
                 android.media.AudioFormat.ENCODING_PCM_16BIT, maxOf(minBuffer * 2, config.frameBytes * 4))
             record = recorder; check(recorder.state == AudioRecord.STATE_INITIALIZED)
-            val network = DatagramSocket(null); network.bind(java.net.InetSocketAddress(LegacyBindAddress.any(config.host), 0)); socket = network
+            val network = DatagramSocket(null); socket = network
+            network.reuseAddress=true
+            network.bind(java.net.InetSocketAddress(LegacyMicrophoneBind.local(config.host,localAddress), 0))
+            log("麦克风 UDP 本地绑定成功；使用车机地址；远端仅用于发送")
             val counters = MicrophoneCounters(); val pcm = ByteArray(config.frameBytes)
             recorder.startRecording()
             check(recorder.recordingState == AudioRecord.RECORDSTATE_RECORDING)
@@ -366,7 +468,7 @@ private class LegacyMicrophone(private val config: MicrophoneConfig, private val
                 if (sent == 1L) log("麦克风首个PCM上行包已发送；非零帧=${diagnostics.microphoneNonZeroFrames.get()}（非零不等于语音已识别；无录音保存）")
                 }
             }
-        } catch (e: Exception) { if (!stopped.get()) log("麦克风失败：${e.javaClass.simpleName}") }
+        } catch (e: Exception) { if (!stopped.get()) log("麦克风失败：${e.javaClass.simpleName}；原因=${UploadSanitizer.clean(e.message ?: "unknown").take(180)}") }
         finally { encoder?.close(); log("麦克风上行结束：读取字节=${diagnostics.microphoneReadBytes.get()}；非零帧=${diagnostics.microphoneNonZeroFrames.get()}；发送包=${diagnostics.microphoneSentPackets.get()}"); try { record?.stop() } catch (_: Exception) {}; try { record?.release() } catch (_: Exception) {}; record = null; socket?.close(); socket = null }
     }
 }

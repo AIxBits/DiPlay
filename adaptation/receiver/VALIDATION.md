@@ -1,16 +1,13 @@
-# Legacy receiver validation
+# Legacy receiver validation — 0.2.36
 
-Adaptation: 0.21-experimental. Upstream baseline: DiPlay 0.2.8,
-`f2d06951b4e8114dbb62f551c12a32a845a3042f`.
+Protocol/media baseline: DiPlay 0.2.8, `f2d06951b4e8114dbb62f551c12a32a845a3042f`. The mainline application remains unchanged. VersionName 0.2.36, versionCode 37, API18/armeabi-v7a.
 
-- 115 JVM tests passed: 113 protocol/media/compatibility tests and 2 IPv6 transport tests. Tests use synthetic authentication identities and temporary local sockets.
-- SDK18 platform class/member audit, single DEX035, ZIP CRC and no native libraries.
-- Post-R8 mDNS service/TXT creation and EnumMap reflection checks passed.
-- APK v1 signature verified for minimum SDK18.
-- Publication source privacy and credential-container checks are run separately.
+The preceding implementation passed 186 host tests (184 primary plus 2 IPv6), including direct audio flow isolation/checksum handling, bounded queue overflow, authentication rejection, socket fallback, asynchronous logging, native JNI/crypto, USB request ordering and video pause/resume. The public repository build independently passed the same 186 tests and APK/packaging checks. A separate scan confirmed no personal identifiers, log-upload token or publisher token in source or APK, and no bundled upload configuration.
 
-The device operator reported the 0.21 Android 4.3 version working after the display-recovery revision. Earlier device feedback confirmed wireless video/touch, music/navigation/Siri invocation and physical steering-key delivery. These observations do not establish support on other firmware, complete USB sessions, all audio streams, telephone duplex audio, iPhone adoption of vehicle GPS/CAN speed or fully authenticated Wi-Fi iAP2 handoff.
+Checks include SDK18 platform references, single DEX035, APK CRC, packaged ARM native library exports/dependencies, v1 signature, post-shrink mDNS reflection, and synthetic mutual TLS. Runtime identity inputs are byte-identical to the pinned upstream public APK's experimental identity. No personal runtime/upload/publish credentials are included in the public APK or source.
 
-The report asset is updated for this public version, without changing the tested runtime source. No firmware image, personal device report, terminal output, runtime accessory identity or signing key belongs in this source tree. English public documentation replaces local development notes.
+Real i.MX6 hardware feedback confirms earlier wireless and wired projection; USB first succeeded in adaptation 0.26. This does not prove universal head-unit compatibility, direct-path audible stability, full call duplex behavior, vehicle GPS/CAN adoption or resolution of OEM service crashes. Android 5.0 interface compatibility is explicitly unverified and known to need a separate adapter.
 
-The upstream Gradle build/lint suite is not part of this optional target's local validation; its app source and build configuration remain unchanged. OEM Reverse Assist/PlatformService crashes are not considered resolved merely because the receiver works.
+The upstream Gradle build/lint suite is outside this optional target's validation scope. No private vehicle logs, terminal history, firmware images or locally generated keys are checked into this contribution branch.
+
+Public APK: `DiPlay-Android43-v0.2.36.apk`, 1,265,461 bytes. SHA256: `e3c76ffd6e51395827c4903b1c0513486ade7fa0c6a68fbd4dea5cac410db157`.

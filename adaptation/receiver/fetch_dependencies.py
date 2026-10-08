@@ -10,6 +10,8 @@ target = Path(os.environ.get("DIPLAY_DEPS_DIR", root / "downloads"))
 target.mkdir(parents=True, exist_ok=True)
 hashes = json.loads(Path(__file__).with_name("dependency-sha256.json").read_text())
 artifacts = {
+    "bctls-jdk15to18-1.79.jar": "org/bouncycastle/bctls-jdk15to18/1.79",
+    "bcutil-jdk15to18-1.79.jar": "org/bouncycastle/bcutil-jdk15to18/1.79",
     "bcprov-jdk15to18-1.79.jar": "org/bouncycastle/bcprov-jdk15to18/1.79",
     "jmdns-3.5.9.jar": "org/jmdns/jmdns/3.5.9",
     "slf4j-api-1.7.36.jar": "org/slf4j/slf4j-api/1.7.36",

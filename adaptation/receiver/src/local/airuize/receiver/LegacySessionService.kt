@@ -21,7 +21,7 @@ class LegacySessionService : Service() {
     @Volatile var microphoneEnabled = false; private set
     @Volatile var observer: ((String)->Unit)? = null
     @Volatile var frameObserver: (()->Unit)? = null
-    private val history = StringBuilder("DiPlay Legacy 0.21; SDK18\n")
+    private val history = StringBuilder("DiPlay Legacy 0.2.36; SDK18\n")
     private val handler = Handler(Looper.getMainLooper())
     private val worker = Executors.newSingleThreadExecutor { Thread(it,"legacy-session-lifecycle").apply { isDaemon=true } }
     private val generation = AtomicInteger()

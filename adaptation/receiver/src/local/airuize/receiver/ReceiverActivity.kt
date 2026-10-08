@@ -22,6 +22,19 @@ class ReceiverActivity : Activity(), SurfaceHolder.Callback {
     private lateinit var homeUi: ReceiverHomeUi
     private lateinit var quickActions: LinearLayout
     private var awaitingProjection = false
+    private val usbDetached:()->Unit = {
+        runOnUiThread {
+            if(!destroyed && ::homeUi.isInitialized && controller?.activeSession==null) {
+                touchQueue.clear()
+                sessionMicrophoneEnabled=false
+                LegacyWiredService.setVideoSurface(null)
+                video.visibility=View.GONE
+                videoBox.visibility=View.GONE
+                showHome()
+                log("USB连接结束：投屏Surface已隐藏，触摸队列已清理，返回DiPlay首页")
+            }
+        }
+    }
     private var bluetoothEventsRegistered=false
     private val bluetoothEvents=object:android.content.BroadcastReceiver() {
         override fun onReceive(context:android.content.Context,intent:android.content.Intent) {
@@ -68,7 +81,7 @@ class ReceiverActivity : Activity(), SurfaceHolder.Callback {
     private val siriControl = SiriRequestSerialiser()
     private val siriRequestNumber = AtomicInteger()
     @Volatile private var sessionMicrophoneEnabled = false
-    private val report = StringBuilder("DiPlay Legacy 0.21; Android SDK18; experimental\n")
+    private val report = StringBuilder("DiPlay Legacy 0.2.36; Android SDK18; experimental\n")
     private val reportStarted = android.os.SystemClock.elapsedRealtime()
     private val diagnosticHandler = android.os.Handler(android.os.Looper.getMainLooper())
     private lateinit var gpsProbe: LegacyGpsProbe
@@ -102,7 +115,8 @@ class ReceiverActivity : Activity(), SurfaceHolder.Callback {
             report.append('+').append(android.os.SystemClock.elapsedRealtime() - reportStarted).append("ms ").append(text).append('\n')
             if (report.length > 60000) report.delete(0, report.length - 48000)
         }
-        if (!destroyed) runOnUiThread { if (!destroyed) { status.text = text; refreshHomeStatus(); val display=ReceiverSettings.read(this).display(); displayWidth=display.widthPixels; displayHeight=display.heightPixels; videoBox.requestLayout() } }
+        if (!RuntimeLogPolicy.updateUi(text)) return
+        if (!destroyed) runOnUiThread { if (!destroyed) { status.text = text; refreshHomeStatus(); val display=ReceiverSettings.read(this).display(); if(displayWidth!=display.widthPixels || displayHeight!=display.heightPixels) { displayWidth=display.widthPixels; displayHeight=display.heightPixels; videoBox.requestLayout() } } }
     }
     private val strings by lazy { LegacyStrings(this) }
     private fun tr(zh:String,en:String,ar:String):String = strings.translate(zh,en,ar)
@@ -133,6 +147,7 @@ class ReceiverActivity : Activity(), SurfaceHolder.Callback {
         button(tr("音视频自检", "Media test", "اختبار الوسائط")) { selfTest() }
         button(tr("日志", "Log", "السجل")) { showReport() }
         button(tr("导出", "Export", "تصدير")) { exportReport() }
+        button(tr("上传日志", "Upload log", "رفع السجل")) { uploadReport() }
         button(tr("诊断", "Diagnostics", "التشخيص")) { showDiagnostics() }
         microphone = CheckBox(this).apply {
             text = tr("麦克风 PCM（重新连接生效）", "Microphone PCM (reconnect)", "الميكروفون (أعد الاتصال)"); textSize = 12f
@@ -193,7 +208,7 @@ class ReceiverActivity : Activity(), SurfaceHolder.Callback {
         layout.addView(controls, FrameLayout.LayoutParams(-1, -2, Gravity.TOP))
         quickActions = LinearLayout(this)
         val menu = Button(this).apply {
-            text = tr("菜单", "Menu", "القائمة") + " v0.21"; textSize = 13f; setPadding(0, 0, 0, 0)
+            text = tr("菜单", "Menu", "القائمة") + " v0.2.36"; textSize = 13f; setPadding(0, 0, 0, 0)
             setOnClickListener { controls.visibility = if (controls.visibility == View.VISIBLE) View.GONE else View.VISIBLE }
         }
         val actionWidth = (100 * resources.displayMetrics.density + 0.5f).toInt()
@@ -216,9 +231,11 @@ class ReceiverActivity : Activity(), SurfaceHolder.Callback {
             { startActivity(android.content.Intent(android.content.Intent.ACTION_MAIN).addCategory(android.content.Intent.CATEGORY_HOME)) },
             { box -> ReceiverSettingsPage(this,::log,::choosePhone,::startUsb,::exportReport,::showReport,
                 { homeUi.view.visibility=View.GONE; quickActions.visibility=View.VISIBLE; controls.visibility=View.VISIBLE },
-                ::selfTest,::chooseAudioChannel,::testAudioChannel,::applySavedSettings).render(box) })
+                ::selfTest,::chooseAudioChannel,::testAudioChannel,::applySavedSettings,
+                { uploadReport() },{ uploadReport(true) },::editUploadDescription,::clearPendingUploads).render(box) })
         layout.addView(homeUi.view, FrameLayout.LayoutParams(-1,-1))
         setContentView(layout); showHome()
+        LegacyWiredService.connectionEndedObserver=usbDetached
         touchThread = Thread({
             while (!destroyed) {
                 try {
@@ -343,7 +360,7 @@ class ReceiverActivity : Activity(), SurfaceHolder.Callback {
     }
     private fun showDiagnostics() {
         val items = arrayOf("功能状态汇总", "车辆GPS检测（60秒）", "导航测试标记", "音频/触摸/Siri结果标记", "声音通道短音测试（先停止连接）", "与原项目功能核对", "方向盘按键检测（15秒）", "CAN车速与原始挡位检测（60秒）", "配置已核对挡位编号")
-        AlertDialog.Builder(this).setTitle("功能诊断 · v0.21")
+        AlertDialog.Builder(this).setTitle("功能诊断 · v0.2.36")
             .setItems(items) { _, index -> when (index) {
                 0 -> diagnosticSummary()
                 1 -> gpsProbe.start()
@@ -383,7 +400,7 @@ class ReceiverActivity : Activity(), SurfaceHolder.Callback {
             val contents = assets.open("feature-parity.txt").bufferedReader(Charsets.UTF_8).use { it.readText() }
             val text = TextView(this).apply { this.text = contents; textSize = 16f; setPadding(20, 16, 20, 16) }
             val scroll = ScrollView(this).apply { addView(text) }
-            AlertDialog.Builder(this).setTitle("功能核对 · v0.21")
+            AlertDialog.Builder(this).setTitle("功能核对 · v0.2.36")
                 .setView(scroll).setPositiveButton("关闭", null).show()
             log("查看功能核对：这是版本能力说明，不是当前会话测试结果")
         } catch (error: Exception) { log("功能核对读取失败：${error.javaClass.simpleName}") }
@@ -614,7 +631,7 @@ class ReceiverActivity : Activity(), SurfaceHolder.Callback {
         }, "legacy-self-test").apply { isDaemon = true; start() }
     }
     private fun showReport() {
-        val content = synchronized(report) { report.toString() } + "\nBackground session:\n" + (sessionService?.report() ?: "") + "\nWired session:\n" + (LegacyWiredService.instance?.report() ?: "")
+        val content = synchronized(report) { report.toString() } + "\nBackground session:\n" + (sessionService?.report() ?: "") + "\nWired session:\n" + (LegacyWiredService.instance?.report() ?: ("Previous USB structural/audio evidence (saved):\n"+TransportEvidence.readPrevious(java.io.File(filesDir,"usb-transport-evidence.txt"))))
         val text = TextView(this).apply { this.text = content; setPadding(12, 12, 12, 12); setTextIsSelectable(true) }
         val scroll = ScrollView(this).apply { addView(text) }
         AlertDialog.Builder(this).setTitle("接收端日志").setView(scroll).setPositiveButton("关闭", null).show()
@@ -634,6 +651,63 @@ class ReceiverActivity : Activity(), SurfaceHolder.Callback {
             }
         }
     }
+    private fun reportContent():String = synchronized(report) { report.toString() } + "\nBackground session:\n" + (sessionService?.report() ?: "") + "\nWired session:\n" + (LegacyWiredService.instance?.report() ?: ("Previous USB structural/audio evidence (saved):\n"+TransportEvidence.readPrevious(java.io.File(filesDir,"usb-transport-evidence.txt"))))
+    private fun editUploadDescription() {
+        val prefs=getSharedPreferences("receiver-ui",MODE_PRIVATE)
+        val input=EditText(this).apply { hint="例如：USB连接后没有画面";setText(prefs.getString("uploadDescription",""));maxLines=3 }
+        AlertDialog.Builder(this).setTitle("上传日志的问题描述").setView(input).setPositiveButton("保存") { _,_->
+            prefs.edit().putString("uploadDescription",input.text.toString().take(200)).commit()
+        }.setNegativeButton("取消",null).show()
+    }
+    private fun clearPendingUploads() {
+        if(LogUploadJob.running.get()) { Toast.makeText(this,"上传中，请稍后",Toast.LENGTH_SHORT).show();return }
+        val count=LogUploadQueue(File(filesDir,"pending-logs")).pending().size
+        AlertDialog.Builder(this).setTitle("清空待上传日志").setMessage("删除应用内的 $count 份待上传日志？已导出的文件不会删除。")
+            .setPositiveButton("清空") { _,_-> if(!LogUploadJob.running.get()) LogUploadQueue(File(filesDir,"pending-logs")).clear() }.setNegativeButton("取消",null).show()
+    }
+    private fun uploadReport(retryOnly:Boolean=false) {
+        if(!LogUploadJob.running.compareAndSet(false,true)) { Toast.makeText(this,"日志正在上传",Toast.LENGTH_SHORT).show();return }
+        val context=applicationContext
+        val snapshot=if(retryOnly) "" else reportContent()
+        val description=getSharedPreferences("receiver-ui",MODE_PRIVATE).getString("uploadDescription","") ?: ""
+        Toast.makeText(this,if(retryOnly) "正在重试待上传日志" else "正在准备脱敏日志",Toast.LENGTH_SHORT).show()
+        Thread({
+            var message=""
+            try {
+                val queue=LogUploadQueue(File(context.filesDir,"pending-logs"))
+                if(!retryOnly) queue.enqueue(snapshot,description)
+                val pending=queue.pending()
+                if(pending.isEmpty()) message="没有待上传日志"
+                else {
+                    val network=context.getSystemService(android.content.Context.CONNECTIVITY_SERVICE) as android.net.ConnectivityManager
+                    if(network.activeNetworkInfo?.isConnected!=true) message="暂无网络；${pending.size} 份脱敏日志已保存待传，联网后点击重试"
+                    else {
+                        val config=context.assets.open("log-upload/config.properties").use { LogUploadConfig.load(it) }
+                        val sender=LogUploadTransport(config)
+                        var count=0
+                        for(item in pending) {
+                            val receipt=sender.submit(item,"0.2.36", "Android ${android.os.Build.VERSION.RELEASE} / SDK${android.os.Build.VERSION.SDK_INT}")
+                            queue.accepted(item);count++
+                            log("日志上传成功：回执=$receipt；本次=$count")
+                        }
+                        message="日志上传成功：$count 份"
+                    }
+                }
+            } catch(error:Exception) {
+                message=when(error) {
+                    is javax.net.ssl.SSLException -> "HTTPS校验或握手失败；日志保留待传"
+                    is java.net.UnknownHostException -> "无法访问上传网站；日志保留待传"
+                    is java.io.FileNotFoundException -> "上传配置未安装；日志保留待传"
+                    is java.net.SocketTimeoutException -> "上传超时；日志保留待传"
+                    else -> error.message?.take(160) ?: "上传失败；日志保留待传"
+                }
+                log("日志上传结果：$message")
+            } finally {
+                LogUploadJob.running.set(false)
+                runOnUiThread { if(!destroyed) Toast.makeText(this,message,Toast.LENGTH_LONG).show() }
+            }
+        },"legacy-log-upload").apply { isDaemon=true;start() }
+    }
     private fun exportReport() {
         log(SystemServiceDiagnostics.snapshot(this))
         try {
@@ -644,7 +718,7 @@ class ReceiverActivity : Activity(), SurfaceHolder.Callback {
             require(directory.path.startsWith(root.path+File.separator))
             check(directory.isDirectory || directory.mkdirs()) { "Cannot create report folder" }
             val file = File(directory, "receiver-${System.currentTimeMillis()}.txt")
-            file.writeText(synchronized(report) { report.toString() } + "\nBackground session:\n" + (sessionService?.report() ?: "") + "\nWired session:\n" + (LegacyWiredService.instance?.report() ?: ""), Charsets.UTF_8)
+            file.writeText(synchronized(report) { report.toString() } + "\nBackground session:\n" + (sessionService?.report() ?: "") + "\nWired session:\n" + (LegacyWiredService.instance?.report() ?: ("Previous USB structural/audio evidence (saved):\n"+TransportEvidence.readPrevious(java.io.File(filesDir,"usb-transport-evidence.txt")))), Charsets.UTF_8)
             log("日志已保存：${file.absolutePath}")
         } catch (e: Exception) { log("保存失败：${e.javaClass.simpleName}") }
     }
@@ -656,6 +730,7 @@ class ReceiverActivity : Activity(), SurfaceHolder.Callback {
         }
     }
     override fun onDestroy() {
+        if(LegacyWiredService.connectionEndedObserver===usbDetached) LegacyWiredService.connectionEndedObserver=null
         if(bluetoothEventsRegistered) { unregisterReceiver(bluetoothEvents); bluetoothEventsRegistered=false }
         sessionService?.observer=null; sessionService?.frameObserver=null; sessionService?.setSurface(null); testSink?.setSurface(null); LegacyWiredService.setVideoSurface(null)
         if(!ReceiverSettings.read(this).background) { sessionService?.disconnect(); stopService(android.content.Intent(this,LegacyWiredService::class.java)) }

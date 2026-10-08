@@ -1,0 +1,6 @@
+{
+  global:
+    Java_local_airuize_receiver_LegacyUsbNative_setInterface;
+    Java_local_airuize_receiver_LegacyAudioCrypto_openNative;
+  local: *;
+};

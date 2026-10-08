@@ -74,6 +74,12 @@ class LegacyAudioCoordinator(context: Context?, private val settings: ReceiverSe
     } }
     @Synchronized internal fun acquire(track: android.media.AudioTrack, channel: com.shilapi.xcertplay.media.AudioChannel) {
         tracks[track] = channel; refresh(); volumes()
+        val callManager = manager
+        if (channel == com.shilapi.xcertplay.media.AudioChannel.PHONE && callManager != null) {
+            runCatching {
+                log("Call route state: mode=${callManager.mode} speaker=${callManager.isSpeakerphoneOn} sco=${callManager.isBluetoothScoOn} voiceVolume=${callManager.getStreamVolume(android.media.AudioManager.STREAM_VOICE_CALL)}/${callManager.getStreamMaxVolume(android.media.AudioManager.STREAM_VOICE_CALL)} musicVolume=${callManager.getStreamVolume(android.media.AudioManager.STREAM_MUSIC)}")
+            }.onFailure { log("Call route state unavailable: ${it.javaClass.simpleName}") }
+        }
     }
     @Synchronized fun release(track: android.media.AudioTrack) { tracks.remove(track); refresh(); volumes() }
     private fun refresh() {
@@ -89,12 +95,14 @@ class LegacyAudioCoordinator(context: Context?, private val settings: ReceiverSe
             com.shilapi.xcertplay.media.AudioChannel.PHONE -> android.media.AudioManager.AUDIOFOCUS_GAIN_TRANSIENT
             else -> android.media.AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK
         }
-        log("Audio focus channel=$next result=${manager.requestAudioFocus(listener, android.media.AudioManager.STREAM_MUSIC, gain)}")
+        val stream = LegacyAudioRoutePolicy.focusStream(next.name)
+        log("Audio focus channel=$next stream=$stream gain=$gain result=${manager.requestAudioFocus(listener, stream, gain)}")
     }
     private fun volumes() {
         val navigation = settings.navigationDuck && tracks.values.any { it == com.shilapi.xcertplay.media.AudioChannel.NAVIGATION }
         tracks.forEach { (track, channel) ->
             val volume = settings.volume / 100f * if (duck || navigation && channel == com.shilapi.xcertplay.media.AudioChannel.MEDIA) 0.2f else 1f
+            log("Audio gain channel=$channel configured=${settings.volume}% effective=$volume focusDuck=$duck navigationDuck=$navigation")
             runCatching { track.setStereoVolume(volume, volume) }
         }
     }

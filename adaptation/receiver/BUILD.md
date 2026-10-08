@@ -49,3 +49,16 @@ presence/consistency. `build.sh` verifies the v1 signature using apksigner.
 The included `adaptation/probe` is an optional API18 capability diagnostic app.
 Its build uses the same JDK/platform/build-tools environment variables; it does
 not participate in the receiver's normal connection flow.
+
+## Native transport and current dependencies
+
+0.2.36 additionally uses Bouncy Castle TLS/util 1.79 (hash-verified by the downloader) and a freestanding ARM EABI5 JNI library for USB ioctls and authenticated audio crypto. Monocypher 4.0.2 source, license and provenance are included under `native/vendor/monocypher`.
+
+Set `DIPLAY_ZIG` to Zig 0.13.0. The compiler archive hash is recorded in the upstream-independent native build documentation below. JNI headers come from JAVA_HOME; the verified host workflow is macOS with JDK 11 and clang. The produced application ABI is armeabi-v7a only.
+
+Zig 0.13.0 macOS aarch64 archive SHA256: `46fae219656545dfaf4dce12fb4e8685cec5b51d721beee9389ab4194d43394c`.
+Official archive: https://ziglang.org/download/0.13.0/zig-macos-aarch64-0.13.0.tar.xz
+
+Public release builds deliberately omit `DIPLAY_LOG_UPLOAD_CONFIG`. Never point that variable to personal credentials when creating a public APK. For intentional integrator builds it may select an external, ignored properties file; no credential values belong in source control. The public APK's experimental accessory identity is byte-identical to the pinned upstream public APK's identity assets. Do not substitute personal provisioning material.
+
+The build verifies v1 signing for API18 and preserves a locally generated ignored key across builds. Public release certificates match the preceding fork APK certificate; signing keystores remain local. Version code 37 is deliberately higher than the prior 36 while the displayed release version is 0.2.36.

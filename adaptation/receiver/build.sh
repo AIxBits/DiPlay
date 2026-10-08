@@ -4,8 +4,8 @@ project_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 workspace_dir=$(CDPATH= cd -- "$project_dir/../.." && pwd)
 sdk_dir=${DIPLAY_PROBE_SDK_DIR:-"$workspace_dir/tools/android"}
 jdk_dir=${DIPLAY_PROBE_JDK_DIR:-${JAVA_HOME:?Set JAVA_HOME to JDK 11}}
-build_tools="$sdk_dir/android-14"
-platform_jar="$sdk_dir/android-4.3.1/android.jar"
+build_tools=${DIPLAY_BUILD_TOOLS_DIR:-"$sdk_dir/android-14"}
+platform_jar=${DIPLAY_PLATFORM_JAR:-"$sdk_dir/android-4.3.1/android.jar"}
 android_min_sdk=${DIPLAY_MIN_SDK:-18}
 android_target_sdk=${DIPLAY_TARGET_SDK:-$android_min_sdk}
 case "$android_min_sdk:$android_target_sdk" in
@@ -20,6 +20,7 @@ dependencies=${DIPLAY_DEPS_DIR:-"$workspace_dir/downloads"}
 mkdir -p "$build_dir/dex" "$delivery_dir"
 mkdir -p "$build_dir/java" "$build_dir/build-tools"
 python3 "$project_dir/prepare_sources.py"
+sh "$project_dir/build-native.sh"
 python3 - "$project_dir" "$workspace_dir" <<'PY'
 import os,sys,shutil
 from pathlib import Path
@@ -39,8 +40,17 @@ if explicit:
         shutil.copy(original,target/name)
     print('Runtime authentication selected explicitly')
 else: print('Source-only build: runtime authentication omitted')
+upload_config=os.environ.get('DIPLAY_LOG_UPLOAD_CONFIG')
+if upload_config:
+    source=Path(upload_config)
+    if not source.is_file() or source.stat().st_size>4096: raise SystemExit('Invalid explicit upload configuration')
+    folder=assets/'log-upload';folder.mkdir()
+    shutil.copy(source,folder/'config.properties')
+    print('Private upload configuration selected explicitly')
+else: print('Source-only build: upload credential omitted')
+
 PY
-compiler_cp="$platform_jar:$dependencies/bcprov-jdk15to18-1.79.jar:$dependencies/jmdns-3.5.9.jar:$dependencies/slf4j-api-1.7.36.jar"
+compiler_cp="$platform_jar:$dependencies/bcprov-jdk15to18-1.79.jar:$dependencies/bctls-jdk15to18-1.79.jar:$dependencies/bcutil-jdk15to18-1.79.jar:$dependencies/jmdns-3.5.9.jar:$dependencies/slf4j-api-1.7.36.jar"
 "$jdk_dir/bin/javac" -source 8 -target 8 -bootclasspath "$platform_jar" -d "$build_dir/java" \
     "$project_dir/src/local/airuize/receiver/LegacyCharsetFields.java"
 "$jdk_dir/bin/jar" cf "$build_dir/java.jar" -C "$build_dir/java" .
@@ -65,10 +75,11 @@ PYSDK
     -A "$build_dir/assets" -I "$platform_jar" -0 mp4 -0 m4a -F "$build_dir/resources.apk"
 "$jdk_dir/bin/java" -Xmx2g -cp "$build_tools/lib/d8.jar" com.android.tools.r8.R8 --release --min-api 18 \
     --pg-conf "$project_dir/shrink.pro" --lib "$platform_jar" --output "$build_dir/dex" "$build_dir/receiver.jar" "$build_dir/java.jar" \
-    "$kotlin_dir/lib/kotlin-stdlib.jar" "$dependencies/bcprov-jdk15to18-1.79.jar" \
+    "$kotlin_dir/lib/kotlin-stdlib.jar" "$dependencies/bcprov-jdk15to18-1.79.jar" "$dependencies/bctls-jdk15to18-1.79.jar" "$dependencies/bcutil-jdk15to18-1.79.jar" \
     "$build_dir/jmdns-legacy.jar" "$dependencies/slf4j-api-1.7.36.jar" "$dependencies/slf4j-nop-1.7.36.jar"
 cp "$build_dir/resources.apk" "$build_dir/unsigned.apk"
 (cd "$build_dir/dex" && zip -q -u "$build_dir/unsigned.apk" classes*.dex)
+(cd "$build_dir/native" && zip -q -u "$build_dir/unsigned.apk" lib/armeabi-v7a/libdiplay_usb.so)
 "$build_tools/zipalign" -f 4 "$build_dir/unsigned.apk" "$build_dir/aligned.apk"
 if [ ! -f "$build_dir/receiver.keystore" ]; then
     "$jdk_dir/bin/keytool" -genkeypair -keystore "$build_dir/receiver.keystore" -storepass local-test-only \

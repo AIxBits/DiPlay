@@ -38,17 +38,70 @@ for source in chosen:
         marker = ') : Closeable {'
         # Add a constructor bind address selected by the current session network family.
         idx = text.index(marker)
-        text = text[:idx] + (', ' if source.name == 'ScreenStream.kt' else '') + '    private val bindAddress: InetAddress = InetAddress.getByName("0.0.0.0"),\n' + text[idx:]
+        text = text[:idx] + (', ' if source.name == 'ScreenStream.kt' else '') + '    private val bindAddress: InetAddress = InetAddress.getByName("0.0.0.0"),\n'+('    private val directLocal: InetAddress? = null,\n    private val directPeer: InetAddress? = null,\n' if source.name == 'AudioStream.kt' else '') + text[idx:]
     else:
         text = text.replace('session.localAddress ?: InetAddress.getByName("::")', 'session.localAddress ?: InetAddress.getByName("0.0.0.0")')
+    if source.name == 'AudioStream.kt':
+        text=text.replace('    private var controlSocket: DatagramSocket? = null','    private var controlSocket: DatagramSocket? = null\n    private val controlPackets=AtomicInteger()\n    private var lastControlReport=0L')
+        text = text.replace('    private var started = false', '    private var started = false\n    private val decryptor = local.airuize.receiver.LegacyAudioCrypto(key)\n    private var receiver: local.airuize.receiver.LegacyAudioReceiver? = null')
+        text = text.replace('    private var started = false', '    private var started = false\n    private val ingress = local.airuize.receiver.LegacyAudioIngress()\n    private var lastIngressReport = 0L')
+        text = text.replace('        dataSocket = data', '        dataSocket = data\n        local.airuize.receiver.LegacyAudioIngress.register(data.localPort, ingress)\n        receiver = local.airuize.receiver.LegacyAudioReceiver(data, ingress, local=directLocal, peer=directPeer)\n        onDiagnostic("Audio backend type=$streamType implementation=${decryptor.backend}")')
+        text=text.replace('        controlSocket = control','        controlSocket = control\n        onDiagnostic("Audio retransmission type=$streamType implemented=false controlReceiveOnly=true requestsSent=0")')
+        text=text.replace('                socket.receive(DatagramPacket(buffer, buffer.size))', '''                val controlPacket=DatagramPacket(buffer,buffer.size)
+                socket.receive(controlPacket)
+                val count=controlPackets.incrementAndGet()
+                val now=System.nanoTime()
+                if(lastControlReport==0L || now-lastControlReport>=5000000000L) {
+                    lastControlReport=now
+                    val second=if(controlPacket.length>1)buffer[1].toInt() and 255 else -1
+                    onDiagnostic("Audio control type=$streamType datagrams=$count lastSecondByte=$second requestsSent=0 retransmissionImplemented=false")
+                }''')
+        text = text.replace('        dataSocket?.close()', '        dataSocket?.let { local.airuize.receiver.LegacyAudioIngress.unregister(it.localPort, ingress) }\n        receiver?.close()\n        dataSocket?.close()')
+        start_data=text.index('                val packet = DatagramPacket(buffer, buffer.size)')
+        end_data=text.index('                val packetNumber =',start_data)
+        text=text[:start_data]+"""                stats.reading()
+                val wire = try {receiver?.next()} catch(error: InterruptedException) {if(closed.get()) return else continue} ?: continue
+                stats.received(wire.size,
+                    if(wire.size>=12) ((wire[2].toInt() and 255) shl 8) or (wire[3].toInt() and 255) else null,
+                    if(wire.size>=12) readU32Be(wire,4) else null)
+"""+text[end_data:]
+        start_crypto=text.index('                val aad = wire.copyOfRange')
+        end_crypto=text.index('                val payload = try {',start_crypto)
+        text=text[:start_crypto]+'                val sample = readU32Be(wire, 4)\n'+text[end_crypto:]
+        text=text.replace('                val payload = try {', '                val rtp = try {')
+        text=text.replace('AirPlayCrypto.chachaOpen(key, nonce, sealed, aad)', 'decryptor.open(wire)')
+        text=text.replace('                val rtp = wire.copyOf(RTP_HEADER_LEN) + payload', '')
+        start_debug=text.index('                val decryptedNumber =')
+        end_debug=text.index('                listener.onPacket(wire, rtp, sample, null)',start_debug)
+        text=text[:start_debug]+'                decryptedPackets.incrementAndGet()\n'+text[end_debug:]
+        text = text.replace('                if (wire.size < RTP_HEADER_LEN + TAIL_LEN) {', '                if (wire.size < RTP_HEADER_LEN + TAIL_LEN) {\n                    ingress.decrypted(false, 0)')
+        text = text.replace('                val rtp = try {', '                val decryptStart = System.nanoTime()\n                val rtp = try {')
+        text = text.replace('                    val failureNumber =', '                    ingress.decrypted(false, System.nanoTime()-decryptStart)\n                    val failureNumber =')
+        text = text.replace('                decryptedPackets.incrementAndGet()', '                ingress.decrypted(true, System.nanoTime()-decryptStart)\n                val now = System.nanoTime()\n                if(lastIngressReport == 0L || now-lastIngressReport >= 5_000_000_000L) {\n                    lastIngressReport=now\n                    onDiagnostic("Audio ingress type=$streamType " + ingress.summary())\n                    receiver?.let {onDiagnostic(it.summary())}\n                }\n                decryptedPackets.incrementAndGet()')
+        text = text.replace('        } finally { stats.flush(ended = true) }', '        } finally { stats.flush(ended = true); onDiagnostic("Audio ingress type=$streamType " + ingress.summary()); receiver?.let {onDiagnostic(it.summary())} }')
+        # Remove upstream debug payload dumps; keep numeric metadata only.
+        text = text.replace('"wire=${wire.toHexString()}"', '"wireBytes=${wire.size}"')
+        text = text.replace('"payloadHead=${payload.copyOf(minOf(payload.size, 16)).toHexString()}"', '"payload omitted"')
+    if source.name == 'AudioStream.kt':
+        text=text.replace('onDiagnostic("', 'emitDiagnostic("').replace('onDiagnostic(it.summary())','emitDiagnostic(it.summary())')
+        text=text.replace('StreamReceiveStats("audio type=$streamType", onDiagnostic)', 'StreamReceiveStats("audio type=$streamType", ::emitDiagnostic)')
+        text=text.replace('    fun listen(listener: Listener)', """    private fun emitDiagnostic(message: String) {
+        val start=System.nanoTime()
+        try {local.airuize.receiver.AudioDiagnosticDispatcher.submit(onDiagnostic,message)} finally {ingress.reported(System.nanoTime()-start)}
+    }
+    fun listen(listener: Listener)""")
     if source.name == 'AirPlaySession.kt':
         text = text.replace('InetAddress.getByName("::")', 'local.airuize.receiver.LegacyBindAddress.any(localAddress)')
         text = text.replace('ntp.listen()', 'ntp.listen(local.airuize.receiver.LegacyBindAddress.any(localAddress))')
+    if source.name == 'ScreenStream.kt':
+        text=text.replace('        server = bound','        server = bound\n        local.airuize.receiver.VideoDiagnosticGate.register(bound.localPort)')
+        text=text.replace('        safeClose(server)','        server?.let {local.airuize.receiver.VideoDiagnosticGate.unregister(it.localPort)}\n        safeClose(server)')
+        text=text.replace('            while (!closed.get()) {','            while (!closed.get()) {\n                if(local.airuize.receiver.VideoDiagnosticGate.paused()) {Thread.sleep(50);continue}')
     if source.name == 'NtpClock.kt':
         text = text.replace('fun listen(): Int', 'fun listen(bindAddress: InetAddress = InetAddress.getByName("0.0.0.0")): Int')
         text = text.replace('InetAddress.getByName("::")', 'bindAddress')
     if source.name == 'CarPlayMediaEngine.kt':
-        text = text.replace('AudioStream(key, type, session::logDebug)', 'AudioStream(key, type, session::logDebug, local.airuize.receiver.LegacyBindAddress.any(session.localAddress))')
+        text = text.replace('AudioStream(key, type, session::logDebug)', 'AudioStream(key, type, session::logDebug, local.airuize.receiver.LegacyBindAddress.any(session.localAddress), session.localAddress, session.remoteAddress)')
         text = text.replace('ScreenStream(key, session::logDebug)', 'ScreenStream(key, session::logDebug, local.airuize.receiver.LegacyBindAddress.any(session.localAddress))')
         # ScreenStream binds to session local address through its caller (see constructor patch below).
     if source.name in ('NcmFunctionDiscovery.kt', 'IphoneCarPlayConfiguration.kt'):
@@ -57,24 +110,61 @@ for source in chosen:
         start = text.index('    fun find(device:')
         end = text.index('        val chosen =', start)
         text = text[:start] + '    fun find(configurations: List<UsbConfiguration>): UsbConfiguration? {\n' + text[end:]
+    if source.name == 'LockdownCarKitClient.kt':
+        text = text.replace('TlsDuplexChannel.open(', 'local.airuize.receiver.LegacyLockdownTls.open(')
     if source.name == 'LockdownTlsEngineFactory.kt':
         text = text.replace('                sslParameters = sslParameters.apply { endpointIdentificationAlgorithm = null }\n', '')
         text = text.replace('KeyManagerFactory.getInstance("PKIX")', 'KeyManagerFactory.getInstance(KeyManagerFactory.getDefaultAlgorithm())')
     if source.name == 'NcmUsbBridge.kt':
+        text = text.replace('    private var buffered = ByteArray(0)', '    private val assembler = local.airuize.receiver.LegacyNtb16Assembler(report)\n    private var buffered = ByteArray(0)')
+        framing_start = text.index('    private fun drainFrames()')
+        framing_end = text.index('    private fun enqueueFrame(', framing_start)
+        text = text[:framing_start] + '''    private fun drainFrames() {} // The bounded assembler handles each received chunk.
+
+    private fun appendBuffered(source: ByteArray, length: Int) {
+        try { for(frame in assembler.accept(source, length)) enqueueFrame(frame) }
+        catch(error: java.io.IOException) { throw failSession(error.message ?: "NCM NTB assembly failed", error) }
+    }
+
+''' + text[framing_end:]
+        text = text.replace('    private val directReadBuffer =', '    private val readPump = local.airuize.receiver.LegacyUsbReadPump(connection, inEndpoint, report)\n    private val directReadBuffer =')
+        text = text.replace('        runCatching { requestToClose?.cancel() }', '        readPump.close()\n        runCatching { requestToClose?.cancel() }')
+        text = text.replace('    descriptorHostMac: ByteArray?,', '    descriptorHostMac: ByteArray?,\n    private val report: (String) -> Unit,')
+        text = text.replace('fun open(connection: UsbDeviceConnection, function: NcmFunctionDiscovery.NcmFunction): NcmUsbBridge', 'fun open(connection: UsbDeviceConnection, function: NcmFunctionDiscovery.NcmFunction, report: (String) -> Unit = {}): NcmUsbBridge')
+        text = text.replace('                    descriptorHostMac,', '                    descriptorHostMac,\n                    report,')
+        text = text.replace('    private var loggedWriteTimeout = false', '    private var loggedWriteTimeout = false\n    private var readPolls = 0L\n    private var readBytes = 0L\n    private var writeAttempts = 0L\n    private var writeBytes = 0L\n    private var lastReadReport = 0L')
+        text = text.replace('        // Before StartCarPlaySession', '''        writeAttempts++
+        if (transferred > 0) writeBytes += transferred
+        if (writeAttempts == 1L || transferred > 0 && writeAttempts < 10L || writeAttempts % 500L == 0L)
+            report("NCM bulk OUT: attempt=$writeAttempts result=$transferred expected=${block.size} sentBytes=$writeBytes endpoint=${outEndpoint.address}")
+        // Before StartCarPlaySession''')
+        text = text.replace('        statusRunning.set(false)', '        report("NCM closed: readPolls=$readPolls receivedBytes=$readBytes writeAttempts=$writeAttempts sentBytes=$writeBytes")\n        statusRunning.set(false)')
+        text = text.replace('                return NcmUsbBridge(', '                report("NCM endpoints: in=${function.bulkIn.address} out=${function.bulkOut.address} packetIn=${function.bulkIn.maxPacketSize} packetOut=${function.bulkOut.maxPacketSize}")\n                return NcmUsbBridge(')
         text = text.replace('import android.hardware.usb.UsbRequest', 'import android.hardware.usb.UsbRequest\nimport local.airuize.receiver.alternateSetting')
         start = text.index('    private fun readChunk(')
         end = text.index('    private fun failSession(', start)
         text = text[:start] + '''    private fun readChunk(timeoutMillis: Long): Int? {
         checkOpen()
-        val transferred = connection.bulkTransfer(inEndpoint, readBuffer, minOf(16384, readBuffer.size), timeoutMillis.coerceIn(1, 250).toInt())
+        val bytes = readPump.next(timeoutMillis.coerceIn(1, 250))
+        val transferred = bytes?.size ?: 0
+        if(bytes!=null) bytes.copyInto(readBuffer)
         checkOpen()
+        readPolls++
+        if(transferred > 0) readBytes += transferred
+        val now=System.nanoTime()
+        if(readPolls == 1L || transferred > 0 && readBytes == transferred.toLong() || now-lastReadReport >= 10_000_000_000L) {
+            lastReadReport=now
+            report("NCM async IN: polls=$readPolls result=$transferred receivedBytes=$readBytes endpoint=${inEndpoint.address}; zero=consumer timeout")
+            report(readPump.summary())
+        }
         return transferred.takeIf { it > 0 }
     }
 
 ''' + text[end:]
-        text = text.replace('connection.setInterface(function.data)', 'local.airuize.receiver.LegacyUsbPlatform.selectInterface(connection, function.data)')
+        assert text.count('connection.setInterface(function.data)') == 1, 'Upstream NCM activation changed; review API18 patch'
+        text = text.replace('connection.setInterface(function.data)', 'local.airuize.receiver.LegacyUsbPlatform.selectInterface(connection, function.data, report)')
     if source.name == 'Ipv6NcmBridge.kt':
-        text = text.replace('    private val onError: (Throwable) -> Unit,', '    private val onError: (Throwable) -> Unit,\n    private val report: (String) -> Unit = {},')
+        text = text.replace('    private val onError: (Throwable) -> Unit,', '    private val onError: (Throwable) -> Unit,\n    private val report: (String) -> Unit = {},\n    private val directAudio: local.airuize.receiver.DirectAudioRouter.Session? = null,')
         text = text.replace('    private var loggedInbound = false', '    private var inboundFrames = 0L\n    private var outboundFrames = 0L\n    private var loggedInbound = false')
         text = text.replace('                peerMac = ipv6.sourceMac', '                peerMac = ipv6.sourceMac\n                inboundFrames++\n                if(inboundFrames == 1L || inboundFrames % 500 == 0L) report("NCM IPv6 inboundFrames=$inboundFrames")')
         text = text.replace('                ncm.send(frame, WRITE_TIMEOUT_MILLIS)', '                ncm.send(frame, WRITE_TIMEOUT_MILLIS)\n                outboundFrames++\n                if(outboundFrames == 1L || outboundFrames % 500 == 0L) report("NCM IPv6 outboundAttempts=$outboundFrames")')
@@ -87,6 +177,11 @@ for source in chosen:
                     }
                 }''')
         text = text.replace('                val length = input.read(buffer)', '                val length = try { input.read(buffer) } catch (error: IOException) {\n                    if (running.get() && local.airuize.receiver.LegacyTun.isWouldBlock(error)) { LockSupport.parkNanos(ZERO_READ_BACKOFF_NANOS); continue }\n                    throw error\n                }')
+    if source.name == 'Ipv6NcmBridge.kt':
+        target = '                val deadline = System.nanoTime() + 500_000_000L'
+        assert target in text
+        text = text.replace(target, '                local.airuize.receiver.LegacyAudioIngress.observe(frame, ipv6.payloadOffset, ipv6.payloadLength, false)\n                if(directAudio?.route(frame, ipv6.payloadOffset, ipv6.payloadLength)==true) continue\n'+target)
+        text = text.replace('output.write(frame, ipv6.payloadOffset, ipv6.payloadLength); break', 'output.write(frame, ipv6.payloadOffset, ipv6.payloadLength); local.airuize.receiver.LegacyAudioIngress.observe(frame, ipv6.payloadOffset, ipv6.payloadLength, true); break')
     # StandardCharsets is API 19; java.util.Base64 is API 26.
     text = text.replace('import java.util.Base64', 'import local.airuize.receiver.LegacyBase64 as Base64')
     text = text.replace('import java.nio.charset.StandardCharsets', 'import local.airuize.receiver.LegacyCharsets as StandardCharsets')
@@ -138,7 +233,7 @@ for source in chosen:
         target = '        val microphone = microphoneConfig(session, type, stream, format)'
         assert target in text
         text = text.replace(target, target + '\n        session.logDebug("receiver audio setup type=$type codec=${format.codec} rate=${format.sampleRate} channels=${format.channels} purpose=${local.airuize.receiver.AudioDiagnostics.purpose(audioType)} microphone=${microphone != null}")')
-        target = '        val audio = AudioStream(key, type, session::logDebug, local.airuize.receiver.LegacyBindAddress.any(session.localAddress))'
+        target = '        val audio = AudioStream(key, type, session::logDebug, local.airuize.receiver.LegacyBindAddress.any(session.localAddress), session.localAddress, session.remoteAddress)'
         assert target in text
         text = text.replace(target, '        var rejectedPackets = 0\n' + target)
         target = '                    capture?.record(wire, rtp, sample, error)'

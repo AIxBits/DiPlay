@@ -69,7 +69,7 @@ class ReceiverHomeUi(private val activity: Activity, private val text: (String,S
             button(right,text("设置","Settings","الإعدادات")) { render("settings") }
             button(right,text("诊断与测试","Diagnostics and tests","التشخيص"),action=diagnostics)
             button(right,text("查看投屏画面","Show projection","عرض الشاشة"),action=projection)
-            right.addView(label("Public preview · 0.21 · Android 4.3",12f))
+            right.addView(label("Public preview · 0.2.36 · Android 4.3",12f))
             if(activity.resources.configuration.screenWidthDp>=850) {
                 fun columns(left:View,rightView:View)=LinearLayout(activity).apply {
                     addView(left,LinearLayout.LayoutParams(0,-2,1.6f))

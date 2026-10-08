@@ -47,12 +47,46 @@ object LegacyUsbPlatform {
             })
         }
     }
-    fun selectConfiguration(connection:UsbDeviceConnection,id:Int):Boolean {
-        val active=ByteArray(1)
-        if(connection.controlTransfer(0x80,8,0,0,active,1,1000)==1 && active[0].toInt() and 255==id) return true
-        return connection.controlTransfer(0,9,id,0,null,0,1000)>=0
+    fun selectConfiguration(connection:UsbDeviceConnection,id:Int,log:(String)->Unit = {}):Boolean {
+        require(id in 1..255)
+        fun active():Int? {
+            val value=ByteArray(1)
+            return if(connection.controlTransfer(0x80,8,0,0,value,1,1000)==1) value[0].toInt() and 255 else null
+        }
+        // A raw SET_CONFIGURATION control request changes the phone but bypasses
+        // usbfs endpoint/interface bookkeeping. Use the same ioctl as Android's
+        // newer UsbDeviceConnection.setConfiguration, through API18 libcore.
+        val before=active()
+        val switched=try {
+            val libcore=Class.forName("libcore.io.Libcore")
+            val os=libcore.getField("os").get(null)
+            val mutable=Class.forName("libcore.util.MutableInt")
+            val arg=mutable.getConstructor(Int::class.javaPrimitiveType).newInstance(id)
+            val ioctl=Class.forName("libcore.io.Os").getMethod("ioctlInt",java.io.FileDescriptor::class.java,Int::class.javaPrimitiveType,mutable)
+            android.os.ParcelFileDescriptor.fromFd(connection.fileDescriptor).use { duplicate ->
+                (ioctl.invoke(os,duplicate.fileDescriptor,UsbConfigurationPolicy.SET_CONFIGURATION_IOCTL,arg) as Int)>=0
+            }
+        } catch(error:Exception) {
+            val cause=(error as? java.lang.reflect.InvocationTargetException)?.targetException ?: error
+            val errno=runCatching { cause.javaClass.getField("errno").getInt(cause) }.getOrNull()
+            log("USB configuration ioctl failed: ${cause.javaClass.simpleName} errno=$errno reason=${cause.message?.take(160)}")
+            false
+        }
+        val after=active()
+        log("USB configuration ioctl: requested=$id before=$before after=$after success=$switched")
+        return UsbConfigurationPolicy.confirmed(id,switched,after)
     }
-    fun selectInterface(connection:UsbDeviceConnection,iface:UsbInterface):Boolean =
-        connection.controlTransfer(1,11,alternate(iface),iface.id,null,0,1000)>=0
+    fun selectInterface(connection:UsbDeviceConnection,iface:UsbInterface,log:(String)->Unit = {}):Boolean {
+        val setting=alternate(iface)
+        val result=try { LegacyUsbNative.select(connection.fileDescriptor,iface.id,setting) }
+        catch(error:LinkageError) { log("NCM interface native backend unavailable: ${error.javaClass.simpleName}"); return false }
+        log("NCM SETINTERFACE ioctl: interface=${iface.id} alternate=$setting result=$result errno=${if(result<0) -result else 0}")
+        if(result<0) return false
+        val value=ByteArray(1)
+        val read=connection.controlTransfer(0x81,10,0,iface.id,value,1,1000)
+        val actual=if(read==1) value[0].toInt() and 255 else null
+        log("NCM GET_INTERFACE: interface=${iface.id} expected=$setting actual=$actual readResult=$read")
+        return actual==null || actual==setting
+    }
 }
 val UsbInterface.alternateSetting:Int get()=LegacyUsbPlatform.alternate(this)
